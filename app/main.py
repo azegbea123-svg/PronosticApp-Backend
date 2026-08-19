@@ -22,21 +22,32 @@ app.add_middleware(
 
 @app.get("/debug/besoccer")
 async def debug_besoccer(equipe: str):
-    """🔧 Diagnostic temporaire, même principe que /debug/sofascore."""
+    """🔧 Diagnostic temporaire, adapté à la version basée sur les slugs d'équipe."""
     import httpx
-    from .sources.besoccer import SEARCH_URL, HEADERS
+    from .sources.besoccer import _candidats_slug, TEAM_URL, HEADERS, _extraire_forme_recente
 
-    resultat: Dict[str, Any] = {"equipe": equipe}
+    resultat: Dict[str, Any] = {
+        "equipe": equipe,
+        "candidats_slug": _candidats_slug(equipe),
+        "essais": [],
+    }
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        try:
-            r = await client.get(
-                SEARCH_URL.format(query=equipe), headers=HEADERS, timeout=10.0
-            )
-            resultat["status_code"] = r.status_code
-            resultat["body_extrait"] = r.text[:500]
-        except Exception as e:
-            resultat["erreur"] = f"{type(e).__name__}: {e}"
+        for slug in _candidats_slug(equipe):
+            url = TEAM_URL.format(slug=slug)
+            try:
+                r = await client.get(url, headers=HEADERS, timeout=10.0)
+                essai: Dict[str, Any] = {"url": url, "status_code": r.status_code}
+
+                if r.status_code == 200:
+                    stats = _extraire_forme_recente(r.text)
+                    essai["stats_extraites"] = stats
+                    resultat["essais"].append(essai)
+                    break
+
+                resultat["essais"].append(essai)
+            except Exception as e:
+                resultat["essais"].append({"url": url, "erreur": f"{type(e).__name__}: {e}"})
 
     return resultat
 
