@@ -29,6 +29,27 @@ app.add_middleware(
 )
 
 
+@app.get("/debug/db")
+def debug_db(session: Optional[Session] = Depends(db.get_session)):
+    """🔧 Diagnostic temporaire : état réel de la connexion base de données."""
+    resultat: Dict[str, Any] = {
+        "DATABASE_URL_definie": bool(db.DATABASE_URL),
+        "engine_cree": db.engine is not None,
+        "session_disponible": session is not None,
+    }
+
+    if session is not None:
+        try:
+            nb_lignes = len(session.exec(select(Pronostic)).all())
+            resultat["connexion_ok"] = True
+            resultat["nb_pronostics_en_base"] = nb_lignes
+        except Exception as e:
+            resultat["connexion_ok"] = False
+            resultat["erreur"] = f"{type(e).__name__}: {e}"
+
+    return resultat
+
+
 @app.get("/debug/besoccer")
 async def debug_besoccer(equipe: str):
     """🔧 Diagnostic temporaire, adapté à la version basée sur les slugs d'équipe."""
