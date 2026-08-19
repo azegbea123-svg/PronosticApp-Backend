@@ -103,7 +103,7 @@ def _extraire_forme_recente(html: str, n: int = 5) -> Optional[Dict[str, Any]]:
     buts_marques = 0
     buts_encaisses = 0
 
-    for lien in soup.find_all("a", href=re.compile(r"^/match/")):
+    for lien in soup.find_all("a", href=re.compile(r"/match/")):
         href = lien.get("href", "")
         if href in vus:
             continue
