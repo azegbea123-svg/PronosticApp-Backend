@@ -20,6 +20,32 @@ app.add_middleware(
 )
 
 
+@app.get("/debug/sofascore")
+async def debug_sofascore(equipe: str):
+    """
+    🔧 Endpoint de diagnostic TEMPORAIRE — à retirer une fois le problème
+    de scraping résolu. Permet de voir ce que Sofascore répond réellement
+    depuis le serveur déployé (code HTTP, début du corps de la réponse),
+    sans passer par toute la logique de parsing qui masquerait l'erreur.
+    """
+    import httpx
+    from .sources.sofascore import BASE, HEADERS
+
+    resultat: Dict[str, Any] = {"equipe": equipe}
+
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(
+                f"{BASE}/search/all?q={equipe}", headers=HEADERS, timeout=10.0
+            )
+            resultat["search_status_code"] = r.status_code
+            resultat["search_body_extrait"] = r.text[:500]
+        except Exception as e:
+            resultat["search_erreur"] = f"{type(e).__name__}: {e}"
+
+    return resultat
+
+
 @app.get("/")
 async def health():
     """Endpoint de santé, utile pour vérifier que le déploiement fonctionne."""
