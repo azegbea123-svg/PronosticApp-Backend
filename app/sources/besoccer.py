@@ -156,6 +156,40 @@ def _extraire_forme_recente(html: str, n: int = 5) -> Optional[Dict[str, Any]]:
     }
 
 
+def _extraire_indisponibles(html: str) -> Optional[int]:
+    """
+    Compte approximatif des joueurs blessés/suspendus, en isolant la
+    portion de page entre le titre "Injuries / Suspensions" et le titre
+    suivant, puis en comptant les liens uniques vers des fiches joueur
+    (/player/...) dans cette zone.
+
+    ⚠️ Heuristique textuelle (recherche de sous-chaîne) plutôt que
+    sélecteur CSS précis — la structure DOM exacte de cette section n'a
+    pas pu être vérifiée depuis cet environnement (accès réseau limité).
+    Donne un ordre de grandeur fiable dans la plupart des cas, pas un
+    chiffre garanti exact à l'unité près.
+    """
+    # ⚠️ Le mot "Injuries" apparaît aussi dans le menu de navigation en haut
+    # de page, mais sous la forme "Injuries/Suspensions" (SANS espaces, comme
+    # lien d'onglet) — alors que le vrai titre de section s'écrit avec des
+    # espaces : "Injuries / Suspensions". On cible cette forme précise pour
+    # ne pas tomber sur le lien de menu.
+    debut = html.find("Injuries / Suspensions")
+    if debut == -1:
+        return None
+
+    bornes_fin = [
+        html.find(marqueur, debut)
+        for marqueur in ("Last seasons", "Honours", "Stadium", "Historical")
+    ]
+    bornes_fin = [b for b in bornes_fin if b != -1]
+    fin = min(bornes_fin) if bornes_fin else debut + 4000  # borne de sécurité
+
+    zone = html[debut:fin]
+    joueurs_uniques = set(re.findall(r"/player/[a-z0-9-]+", zone, re.I))
+    return len(joueurs_uniques)
+
+
 async def get_team_stats(nom_equipe: str) -> Optional[Dict[str, Any]]:
     """Point d'entrée utilisé par le reste de l'app. Renvoie None si indisponible."""
     async with httpx.AsyncClient() as client:
@@ -166,4 +200,5 @@ async def get_team_stats(nom_equipe: str) -> Optional[Dict[str, Any]]:
         if stats is None:
             return None
         stats["source"] = "BeSoccer"
+        stats["indisponibles"] = _extraire_indisponibles(html)
         return stats

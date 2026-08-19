@@ -1,14 +1,23 @@
 import asyncio
-from typing import Optional, Dict, Any
+from datetime import datetime
+from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlmodel import Session, select
 
 from .models import MatchAnalysisRequest, MatchAnalysisResponse
 from .sources import sofascore, besoccer, flashscore
 from .analysis import generer_pronostic
+from .db_models import Pronostic
+from . import db
 
 app = FastAPI(title="PronosticApp API")
+
+
+@app.on_event("startup")
+def au_demarrage():
+    db.creer_tables()  # ne fait rien si DATABASE_URL n'est pas configurée
 
 # CORS ouvert : simple pour un backend consommé uniquement par l'appli Android.
 # À restreindre si un jour ce backend est aussi appelé depuis un site web public.
@@ -84,30 +93,129 @@ async def health():
     return {"status": "ok", "service": "PronosticApp API"}
 
 
-async def _stats_multi_sources(nom_equipe: str) -> Optional[Dict[str, Any]]:
+async def _stats_toutes_sources(nom_equipe: str) -> List[Dict[str, Any]]:
     """
-    Essaie chaque source dans l'ordre de fiabilité (Sofascore > BeSoccer > Flashscore)
-    et renvoie la première qui répond avec des données exploitables.
+    Interroge TOUTES les sources en parallèle (plus seulement la première
+    qui répond) et renvoie la liste de celles qui ont réussi. La fusion
+    (moyennes, cumuls) est faite ensuite dans analysis.py — additionner
+    les compteurs bruts de plusieurs sources est mathématiquement sûr même
+    si elles se recoupent sur les mêmes matchs réels.
     """
-    for source in (sofascore.get_team_stats, besoccer.get_team_stats, flashscore.get_team_stats):
+    resultats: List[Dict[str, Any]] = []
+
+    async def _essayer(fonction_source):
         try:
-            stats = await source(nom_equipe)
+            stats = await fonction_source(nom_equipe)
             if stats:
-                return stats
+                resultats.append(stats)
         except Exception:
             # Une source qui échoue ne doit jamais faire planter toute la requête
-            continue
-    return None
+            pass
+
+    await asyncio.gather(
+        _essayer(sofascore.get_team_stats),
+        _essayer(besoccer.get_team_stats),
+        _essayer(flashscore.get_team_stats),
+    )
+
+    return resultats
 
 
 @app.post("/match/analyse", response_model=MatchAnalysisResponse)
-async def analyser_match(requete: MatchAnalysisRequest):
-    stats1, stats2 = await asyncio.gather(
-        _stats_multi_sources(requete.equipe1),
-        _stats_multi_sources(requete.equipe2),
+async def analyser_match(
+    requete: MatchAnalysisRequest, session: Optional[Session] = Depends(db.get_session)
+):
+    stats1_sources, stats2_sources = await asyncio.gather(
+        _stats_toutes_sources(requete.equipe1),
+        _stats_toutes_sources(requete.equipe2),
     )
 
     resultat = generer_pronostic(
-        requete.equipe1, requete.equipe2, requete.typeMatch, stats1, stats2
+        requete.equipe1, requete.equipe2, requete.typeMatch, stats1_sources, stats2_sources
     )
+
+    if session:
+        try:
+            enregistrement = Pronostic(
+                equipe1=resultat["equipe1"],
+                equipe2=resultat["equipe2"],
+                type_match=requete.typeMatch,
+                probabilite_v1=resultat["probabiliteVictoireEquipe1"],
+                probabilite_nul=resultat["probabiliteMatchNul"],
+                probabilite_v2=resultat["probabiliteVictoireEquipe2"],
+            )
+            session.add(enregistrement)
+            session.commit()
+        except Exception:
+            # L'historique est un bonus : un souci de DB ne doit jamais
+            # empêcher l'utilisateur de recevoir son pronostic.
+            session.rollback()
+
     return resultat
+
+
+def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
+    if p_v1 >= p_nul and p_v1 >= p_v2:
+        return "V1"
+    if p_v2 >= p_nul and p_v2 >= p_v1:
+        return "V2"
+    return "NUL"
+
+
+@app.get("/historique")
+def lister_historique(limite: int = 20, session: Optional[Session] = Depends(db.get_session)):
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    lignes = session.exec(
+        select(Pronostic).order_by(Pronostic.cree_le.desc()).limit(limite)
+    ).all()
+    return lignes
+
+
+@app.patch("/historique/{pronostic_id}")
+def enregistrer_resultat_reel(
+    pronostic_id: int, resultat_reel: str, session: Optional[Session] = Depends(db.get_session)
+):
+    """
+    Renseigne le résultat réel d'un match une fois connu (saisie manuelle
+    pour l'instant — une vérification automatique via re-scraping des
+    scores finaux est une amélioration possible pour plus tard).
+
+    resultat_reel doit valoir "V1", "NUL" ou "V2".
+    """
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+    if resultat_reel not in ("V1", "NUL", "V2"):
+        raise HTTPException(400, "resultat_reel doit être 'V1', 'NUL' ou 'V2'")
+
+    ligne = session.get(Pronostic, pronostic_id)
+    if not ligne:
+        raise HTTPException(404, "Pronostic introuvable")
+
+    predit = _resultat_predit(ligne.probabilite_v1, ligne.probabilite_nul, ligne.probabilite_v2)
+
+    ligne.resultat_reel = resultat_reel
+    ligne.verifie = True
+    ligne.correct = predit == resultat_reel
+
+    session.add(ligne)
+    session.commit()
+    session.refresh(ligne)
+    return ligne
+
+
+@app.get("/historique/stats")
+def stats_fiabilite(session: Optional[Session] = Depends(db.get_session)):
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    verifies = session.exec(select(Pronostic).where(Pronostic.verifie == True)).all()  # noqa: E712
+    total = len(verifies)
+    corrects = sum(1 for p in verifies if p.correct)
+
+    return {
+        "total_pronostics_verifies": total,
+        "pronostics_corrects": corrects,
+        "taux_reussite": round(corrects / total, 3) if total > 0 else None,
+    }

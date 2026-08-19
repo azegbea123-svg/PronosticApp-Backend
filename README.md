@@ -154,18 +154,54 @@ Teste ensuite sur un **vrai téléphone** (plus seulement l'émulateur) :
 maintenant que le backend a une URL publique, ça doit fonctionner
 depuis n'importe quel réseau, pas seulement en local.
 
-## Limites connues de cette v1
+## 5. Historique et fiabilité des pronostics
 
-- Le pronostic est une **heuristique simple** (forme récente + petit
-  bonus domicile), pas un modèle statistique avancé — volontairement,
-  pour rester explicable dans les "facteurs clés". À affiner plus tard
-  si besoin (ex. pondération par force du championnat, confrontations
-  directes réelles, blessures).
+Chaque appel à `/match/analyse` enregistre automatiquement le pronostic
+en base (silencieusement — si la base n'est pas configurée ou a un
+souci, ça n'empêche jamais de recevoir la réponse).
+
+**Nouveaux endpoints** :
+
+- `GET /historique?limite=20` — liste les derniers pronostics enregistrés
+- `PATCH /historique/{id}?resultat_reel=V1` — renseigne le résultat réel
+  une fois le match joué (`V1`, `NUL` ou `V2`)
+- `GET /historique/stats` — taux de réussite global une fois des
+  pronostics vérifiés
+
+⚠️ **Saisie manuelle pour l'instant** : il n'y a pas encore de
+vérification automatique (qui irait re-scraper le score final du match
+une fois celui-ci terminé). C'est la suite logique une fois que le
+reste est stable — pour l'instant, `PATCH /historique/{id}` doit être
+appelé à la main (ou depuis l'appli, à construire) après chaque match.
+
+**Base de données** : `render.yaml` déclare maintenant une base Postgres
+gratuite liée automatiquement au service. Après avoir poussé ces
+changements sur GitHub, si Render ne détecte pas le nouveau `render.yaml`
+automatiquement, va sur le dashboard Render → ton Blueprint → **"Sync"**
+pour forcer la prise en compte de la nouvelle base et de la variable
+`DATABASE_URL`.
+
+⚠️ **Rappel** : ce plan Postgres gratuit expire au bout de **90 jours**
+— pense à surveiller la date d'expiration dans le dashboard Render, ou à
+migrer vers une base externe (Neon, Supabase) avant cette échéance si tu
+veux garder l'historique.
+
+## Limites connues
+
+- Le modèle statistique (Poisson) reste simplifié — il ne prend pas en
+  compte la force du championnat, les confrontations directes
+  historiques, ni la météo/le contexte du match. Une base solide,
+  perfectible.
 - Si aucune des deux sources ne trouve l'équipe (faute de frappe, club
   amateur peu référencé...), le pronostic retombe sur un résultat neutre
   et le dit explicitement à l'utilisateur plutôt que d'inventer des
   chiffres.
+- Le comptage des indisponibles (blessures/suspensions) est une
+  heuristique textuelle sur BeSoccer, pas un sélecteur garanti à 100% —
+  donne un ordre de grandeur fiable dans la plupart des cas.
 - Pas de cache : chaque requête relance les recherches en direct. À
   ajouter (ex. Redis, ou simple cache mémoire avec TTL) si le volume
   d'utilisateurs augmente, pour ne pas se faire bloquer par les sites
   sources à cause d'un trafic trop élevé.
+- La vérification des résultats réels est manuelle (voir section 5) —
+  pas encore d'automatisation.

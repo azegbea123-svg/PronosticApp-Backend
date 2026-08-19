@@ -1,3 +1,7 @@
+databases:
+  - name: pronosticapp-db
+    plan: free
+
 services:
   - type: web
     name: pronosticapp-backend
@@ -6,3 +10,8 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pronosticapp-db
+          property: connectionString
