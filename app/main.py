@@ -29,6 +29,16 @@ app.add_middleware(
 )
 
 
+@app.get("/debug/elo")
+async def debug_elo(equipe1: str, equipe2: str):
+    """🔧 Diagnostic temporaire pour la recherche d'ELO/confrontation directe."""
+    try:
+        resultat = await besoccer.get_elo_confrontation(equipe1, equipe2)
+        return {"equipe1": equipe1, "equipe2": equipe2, "resultat": resultat}
+    except Exception as e:
+        return {"equipe1": equipe1, "equipe2": equipe2, "erreur": f"{type(e).__name__}: {e}"}
+
+
 @app.get("/debug/db")
 def debug_db(session: Optional[Session] = Depends(db.get_session)):
     """🔧 Diagnostic temporaire : état réel de la connexion base de données."""
@@ -142,17 +152,31 @@ async def _stats_toutes_sources(nom_equipe: str) -> List[Dict[str, Any]]:
     return resultats
 
 
+async def _elo_confrontation_sure(equipe1: str, equipe2: str) -> Optional[Dict[str, Any]]:
+    """Ne fait jamais planter la requête si la recherche d'ELO échoue."""
+    try:
+        return await besoccer.get_elo_confrontation(equipe1, equipe2)
+    except Exception:
+        return None
+
+
 @app.post("/match/analyse", response_model=MatchAnalysisResponse)
 async def analyser_match(
     requete: MatchAnalysisRequest, session: Optional[Session] = Depends(db.get_session)
 ):
-    stats1_sources, stats2_sources = await asyncio.gather(
+    stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
         _stats_toutes_sources(requete.equipe1),
         _stats_toutes_sources(requete.equipe2),
+        _elo_confrontation_sure(requete.equipe1, requete.equipe2),
     )
 
     resultat = generer_pronostic(
-        requete.equipe1, requete.equipe2, requete.typeMatch, stats1_sources, stats2_sources
+        requete.equipe1,
+        requete.equipe2,
+        requete.typeMatch,
+        stats1_sources,
+        stats2_sources,
+        elo_confrontation=elo_confrontation,
     )
 
     if session:

@@ -133,12 +133,34 @@ def _facteurs(nom: str, stats: Optional[Dict[str, Any]]) -> List[str]:
     return facteurs
 
 
+def _facteur_elo(elo_equipe1: Optional[float], elo_equipe2: Optional[float]) -> Tuple[float, float]:
+    """
+    Convertit un écart d'ELO en multiplicateurs à appliquer aux buts
+    attendus de chaque équipe, via la formule logistique standard des
+    systèmes ELO (la même famille de formule que les échecs).
+
+    Sans ELO disponible pour les deux équipes : (1.0, 1.0), neutre —
+    n'affecte pas le calcul basé sur les buts récents.
+    """
+    if elo_equipe1 is None or elo_equipe2 is None:
+        return 1.0, 1.0
+
+    force1 = 10 ** (elo_equipe1 / 400)
+    force2 = 10 ** (elo_equipe2 / 400)
+    part1 = force1 / (force1 + force2)  # entre 0 et 1
+
+    # part1 = 0.5 (équipes égales) -> multiplicateur neutre (1.0, 1.0)
+    # part1 > 0.5 -> boost équipe1, réduction équipe2, et inversement
+    return 2 * part1, 2 * (1 - part1)
+
+
 def generer_pronostic(
     equipe1: str,
     equipe2: str,
     type_match: str,
     stats1_sources: List[Dict[str, Any]],
     stats2_sources: List[Dict[str, Any]],
+    elo_confrontation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     stats1 = _fusionner_stats(stats1_sources)
     stats2 = _fusionner_stats(stats2_sources)
@@ -149,9 +171,22 @@ def generer_pronostic(
     lambda1 = force_att1 * faib_def2 * MOYENNE_BUTS_LIGUE * AVANTAGE_DOMICILE
     lambda2 = force_att2 * faib_def1 * MOYENNE_BUTS_LIGUE
 
+    elo1 = elo_confrontation.get("elo_equipe1") if elo_confrontation else None
+    elo2 = elo_confrontation.get("elo_equipe2") if elo_confrontation else None
+    facteur_elo1, facteur_elo2 = _facteur_elo(elo1, elo2)
+    lambda1 *= facteur_elo1
+    lambda2 *= facteur_elo2
+
     p1, p_nul, p2 = _probabilites_1x2(lambda1, lambda2)
 
     facteurs = _facteurs(equipe1, stats1) + _facteurs(equipe2, stats2)
+
+    if elo_confrontation:
+        facteurs.append(
+            f"Confrontation directe identifiée — ELO {equipe1} : {elo1:.0f}, "
+            f"{equipe2} : {elo2:.0f} (BeSoccer, intègre déjà la qualité des "
+            f"adversaires affrontés par chaque équipe)"
+        )
 
     if p1 > p2 and p1 > p_nul:
         favori: Optional[str] = equipe1

@@ -80,11 +80,12 @@ async def _get_html(client: httpx.AsyncClient, url: str) -> Optional[str]:
     return None
 
 
-async def _trouver_page_equipe(client: httpx.AsyncClient, nom_equipe: str) -> Optional[str]:
+async def _trouver_page_equipe(client: httpx.AsyncClient, nom_equipe: str) -> Optional[tuple]:
+    """Renvoie (html, slug_utilise) pour le premier slug qui fonctionne, ou None."""
     for slug in _candidats_slug(nom_equipe):
         html = await _get_html(client, TEAM_URL.format(slug=slug))
         if html:
-            return html
+            return html, slug
     return None
 
 
@@ -193,12 +194,122 @@ def _extraire_indisponibles(html: str) -> Optional[int]:
 async def get_team_stats(nom_equipe: str) -> Optional[Dict[str, Any]]:
     """Point d'entrée utilisé par le reste de l'app. Renvoie None si indisponible."""
     async with httpx.AsyncClient() as client:
-        html = await _trouver_page_equipe(client, nom_equipe)
-        if not html:
+        trouve = await _trouver_page_equipe(client, nom_equipe)
+        if not trouve:
             return None
+        html, _slug = trouve
         stats = _extraire_forme_recente(html)
         if stats is None:
             return None
         stats["source"] = "BeSoccer"
         stats["indisponibles"] = _extraire_indisponibles(html)
         return stats
+
+
+ANALYSIS_URL = "https://www.besoccer.com/match/{slug1}/{slug2}/{match_id}/analysis"
+
+
+def _chercher_match_id(html: str, slug_propre: str, slugs_adversaire: List[str]) -> Optional[tuple]:
+    """
+    Cherche sur la page un lien /match/{a}/{b}/{id} où l'une des deux
+    équipes est bien la nôtre (slug_propre) et l'autre est l'adversaire
+    recherché. Renvoie (slug_a, slug_b, id) dans leur ordre RÉEL tel que
+    trouvé dans l'URL (important pour savoir plus tard quel ELO
+    correspond à qui).
+
+    Vérifier que NOTRE slug apparaît aussi dans le lien évite de tomber
+    par erreur sur un match sans rapport affiché ailleurs sur la page
+    (ex: bandeau "Most viewed matches").
+    """
+    for m in re.finditer(r"/match/([a-z0-9-]+)/([a-z0-9-]+)/(\d+)", html):
+        a, b, match_id = m.group(1), m.group(2), m.group(3)
+        if a == slug_propre and b in slugs_adversaire:
+            return a, b, match_id
+        if b == slug_propre and a in slugs_adversaire:
+            return a, b, match_id
+    return None
+
+
+def _extraire_elo(html: str) -> Optional[tuple]:
+    """
+    Cherche dans les tableaux de la page une ligne à 3 cellules dont la
+    cellule du milieu vaut exactement "ELO" — structure confirmée par
+    récupération réelle d'une page d'analyse BeSoccer (ex: "92 | ELO | 73").
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for ligne in soup.find_all("tr"):
+        cellules = ligne.find_all(["td", "th"])
+        textes = [c.get_text(strip=True) for c in cellules]
+        if len(textes) == 3 and textes[1] == "ELO":
+            try:
+                return float(textes[0]), float(textes[2])
+            except ValueError:
+                continue
+    return None
+
+
+async def get_elo_confrontation(equipe1: str, equipe2: str) -> Optional[Dict[str, Any]]:
+    """
+    Cherche si ces deux équipes ont un match programmé ou récent l'une
+    contre l'autre (via les liens "Last match" / "Next match" / "Form in
+    last matches" déjà présents sur leurs pages), et si oui, récupère
+    l'ELO des deux équipes depuis la page d'analyse BeSoccer de ce match
+    — un signal de force qui intègre déjà la qualité des adversaires
+    affrontés par chaque équipe au fil du temps.
+
+    Renvoie None si aucun match commun n'est trouvé (les deux équipes ne
+    se sont pas croisées récemment/prochainement) — dans ce cas, le
+    modèle continue de fonctionner sans ce signal supplémentaire.
+    """
+    candidats1 = _candidats_slug(equipe1)
+    candidats2 = _candidats_slug(equipe2)
+
+    async with httpx.AsyncClient() as client:
+        page1 = await _trouver_page_equipe(client, equipe1)
+        trouve = None
+        slug_propre = None
+        trouve_pour = None  # "equipe1" ou "equipe2" : pour qui la recherche a abouti
+
+        if page1:
+            html1, slug1 = page1
+            trouve = _chercher_match_id(html1, slug1, candidats2)
+            if trouve:
+                slug_propre = slug1
+                trouve_pour = "equipe1"
+
+        if not trouve:
+            page2 = await _trouver_page_equipe(client, equipe2)
+            if page2:
+                html2, slug2 = page2
+                trouve = _chercher_match_id(html2, slug2, candidats1)
+                if trouve:
+                    slug_propre = slug2
+                    trouve_pour = "equipe2"
+
+        if not trouve:
+            return None
+
+        slug_a, slug_b, match_id = trouve
+        url_analyse = ANALYSIS_URL.format(slug1=slug_a, slug2=slug_b, match_id=match_id)
+        html_analyse = await _get_html(client, url_analyse)
+        if not html_analyse:
+            return None
+
+        elo = _extraire_elo(html_analyse)
+        if not elo:
+            return None
+
+        elo_a, elo_b = elo
+        elo_propre, elo_adversaire = (elo_a, elo_b) if slug_a == slug_propre else (elo_b, elo_a)
+
+        if trouve_pour == "equipe1":
+            elo_equipe1, elo_equipe2 = elo_propre, elo_adversaire
+        else:
+            elo_equipe1, elo_equipe2 = elo_adversaire, elo_propre
+
+        return {
+            "elo_equipe1": elo_equipe1,
+            "elo_equipe2": elo_equipe2,
+            "match_id": match_id,
+            "source": "BeSoccer (analyse ELO)",
+        }
