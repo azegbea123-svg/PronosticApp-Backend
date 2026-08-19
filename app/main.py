@@ -29,21 +29,6 @@ app.add_middleware(
 )
 
 
-@app.get("/equipes/recherche")
-async def rechercher_equipes(q: str):
-    """
-    Suggestions d'équipes pour l'autocomplétion côté appli, au fur et à
-    mesure que l'utilisateur tape. Ne remplace pas la saisie libre —
-    l'utilisateur peut toujours taper un nom qui n'apparaît pas dans les
-    suggestions et lancer l'analyse quand même.
-    """
-    try:
-        suggestions = await sofascore.rechercher_equipes(q)
-    except Exception:
-        suggestions = []
-    return {"suggestions": suggestions}
-
-
 @app.get("/debug/elo")
 async def debug_elo(equipe1: str, equipe2: str):
     """🔧 Diagnostic temporaire pour la recherche d'ELO/confrontation directe."""
@@ -158,8 +143,12 @@ async def _stats_toutes_sources(nom_equipe: str) -> List[Dict[str, Any]]:
             # Une source qui échoue ne doit jamais faire planter toute la requête
             pass
 
+    # ⚠️ Sofascore est retiré ici : bloqué de façon permanente (403) depuis
+    # l'IP de Render. Le garder ne ferait qu'ajouter un délai d'attente
+    # (timeout) à chaque requête sans jamais réussir. Le module reste
+    # disponible (app/sources/sofascore.py) si un jour le déploiement
+    # change d'hébergeur et que le blocage ne s'applique plus.
     await asyncio.gather(
-        _essayer(sofascore.get_team_stats),
         _essayer(besoccer.get_team_stats),
         _essayer(flashscore.get_team_stats),
     )
