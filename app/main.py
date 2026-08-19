@@ -20,6 +20,27 @@ app.add_middleware(
 )
 
 
+@app.get("/debug/besoccer")
+async def debug_besoccer(equipe: str):
+    """🔧 Diagnostic temporaire, même principe que /debug/sofascore."""
+    import httpx
+    from .sources.besoccer import SEARCH_URL, HEADERS
+
+    resultat: Dict[str, Any] = {"equipe": equipe}
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            r = await client.get(
+                SEARCH_URL.format(query=equipe), headers=HEADERS, timeout=10.0
+            )
+            resultat["status_code"] = r.status_code
+            resultat["body_extrait"] = r.text[:500]
+        except Exception as e:
+            resultat["erreur"] = f"{type(e).__name__}: {e}"
+
+    return resultat
+
+
 @app.get("/debug/sofascore")
 async def debug_sofascore(equipe: str):
     """
