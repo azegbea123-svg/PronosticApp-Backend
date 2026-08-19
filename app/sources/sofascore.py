@@ -108,3 +108,38 @@ async def get_team_stats(nom_equipe: str) -> Optional[Dict[str, Any]]:
         forme["team_id"] = team_id
         forme["source"] = "Sofascore"
         return forme
+
+
+async def rechercher_equipes(query: str, limite: int = 8) -> List[Dict[str, Any]]:
+    """
+    Renvoie une liste de suggestions d'équipes correspondant à la saisie,
+    pour l'autocomplétion côté appli — pas juste la première trouvée
+    (contrairement à find_team_id, utilisé lui pour l'analyse de match).
+    """
+    if len(query.strip()) < 2:
+        return []  # évite de spammer l'API pour 1 seule lettre tapée
+
+    async with httpx.AsyncClient() as client:
+        data = await _get(client, f"{BASE}/search/all?q={query}")
+
+    if not data:
+        return []
+
+    suggestions: List[Dict[str, Any]] = []
+    for res in data.get("results", []):
+        if res.get("type") != "team":
+            continue
+        entity = res.get("entity", {})
+        nom = entity.get("name")
+        if not nom:
+            continue
+
+        pays = None
+        if isinstance(entity.get("country"), dict):
+            pays = entity["country"].get("name")
+
+        suggestions.append({"nom": nom, "pays": pays})
+        if len(suggestions) >= limite:
+            break
+
+    return suggestions

@@ -29,6 +29,21 @@ app.add_middleware(
 )
 
 
+@app.get("/equipes/recherche")
+async def rechercher_equipes(q: str):
+    """
+    Suggestions d'équipes pour l'autocomplétion côté appli, au fur et à
+    mesure que l'utilisateur tape. Ne remplace pas la saisie libre —
+    l'utilisateur peut toujours taper un nom qui n'apparaît pas dans les
+    suggestions et lancer l'analyse quand même.
+    """
+    try:
+        suggestions = await sofascore.rechercher_equipes(q)
+    except Exception:
+        suggestions = []
+    return {"suggestions": suggestions}
+
+
 @app.get("/debug/elo")
 async def debug_elo(equipe1: str, equipe2: str):
     """🔧 Diagnostic temporaire pour la recherche d'ELO/confrontation directe."""
