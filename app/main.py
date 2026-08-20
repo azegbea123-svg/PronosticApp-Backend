@@ -32,8 +32,17 @@ app = FastAPI(title="PronosticApp API")
 
 @app.on_event("startup")
 def au_demarrage():
-    db.creer_tables()  # ne fait rien si DATABASE_URL n'est pas configurée
-    db.migrer_schema()  # ajoute les colonnes manquantes sur les tables déjà existantes
+    try:
+        db.creer_tables()  # ne fait rien si DATABASE_URL n'est pas configurée
+    except Exception as e:
+        print(f"⚠️ Erreur lors de la création des tables (non bloquante) : {e}")
+    try:
+        db.migrer_schema()  # ajoute les colonnes manquantes sur les tables déjà existantes
+    except Exception as e:
+        # Un souci de migration ne doit JAMAIS empêcher l'appli de démarrer
+        # (mieux vaut tourner avec un schéma partiellement à jour que ne
+        # pas tourner du tout — et ça évite un 502 permanent).
+        print(f"⚠️ Erreur lors de la migration de schéma (non bloquante) : {e}")
 
 # CORS ouvert : simple pour un backend consommé uniquement par l'appli Android.
 # À restreindre si un jour ce backend est aussi appelé depuis un site web public.
