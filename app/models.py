@@ -6,6 +6,7 @@ class MatchAnalysisRequest(BaseModel):
     equipe1: str
     equipe2: str
     typeMatch: str
+    telephone: str  # identifiant utilisateur simple, pour le suivi du quota gratuit / statut VIP
 
 
 class ScoreProbable(BaseModel):

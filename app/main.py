@@ -1,16 +1,31 @@
 import asyncio
-from datetime import datetime
+import os
+import random
+import string
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from .models import MatchAnalysisRequest, MatchAnalysisResponse
 from .sources import sofascore, besoccer, flashscore
 from .analysis import generer_pronostic
-from .db_models import Pronostic
+from .db_models import Pronostic, Utilisateur, CodeVip
 from . import db
+from . import paygate
+
+# 💎 Config VIP — modifiable directement ici.
+PRIX_VIP_FCFA = 500
+DUREE_VIP_JOURS = 3
+LIMITE_GRATUITE_QUOTIDIENNE = 3
+
+# ⚠️ Mot de passe admin simple (pas un vrai système d'auth). À définir en
+# variable d'environnement sur Render plutôt que de garder la valeur par
+# défaut ci-dessous en production.
+MOT_DE_PASSE_ADMIN = os.environ.get("ADMIN_PASSWORD", "change-moi")
 
 app = FastAPI(title="PronosticApp API")
 
@@ -18,6 +33,7 @@ app = FastAPI(title="PronosticApp API")
 @app.on_event("startup")
 def au_demarrage():
     db.creer_tables()  # ne fait rien si DATABASE_URL n'est pas configurée
+    db.migrer_schema()  # ajoute les colonnes manquantes sur les tables déjà existantes
 
 # CORS ouvert : simple pour un backend consommé uniquement par l'appli Android.
 # À restreindre si un jour ce backend est aussi appelé depuis un site web public.
@@ -174,10 +190,52 @@ async def _elo_confrontation_sure(equipe1: str, equipe2: str) -> Optional[Dict[s
         return None
 
 
+def _normaliser_telephone(telephone: str) -> str:
+    """
+    Normalise un numéro de téléphone en identifiant stable : retire les
+    espaces et le signe '+'. Important car '+' est traditionnellement
+    décodé comme un espace dans une chaîne de requête HTTP — sans cette
+    normalisation, "+22890000000" envoyé en query param pouvait finir
+    par ne plus correspondre au même numéro stocké ailleurs.
+    Ex: "+228 90 00 00 00" -> "22890000000"
+    """
+    return telephone.replace(" ", "").replace("+", "").strip()
+
+
+def _est_vip(utilisateur: Optional[Utilisateur]) -> bool:
+    if not utilisateur or not utilisateur.vip_expire_le:
+        return False
+    return utilisateur.vip_expire_le > datetime.utcnow()
+
+
+def _pronostics_utilises_aujourdhui(session: Session, telephone: str) -> int:
+    debut_jour = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    lignes = session.exec(
+        select(Pronostic).where(Pronostic.telephone == telephone, Pronostic.cree_le >= debut_jour)
+    ).all()
+    return len(lignes)
+
+
 @app.post("/match/analyse", response_model=MatchAnalysisResponse)
 async def analyser_match(
     requete: MatchAnalysisRequest, session: Optional[Session] = Depends(db.get_session)
 ):
+    telephone = _normaliser_telephone(requete.telephone)
+
+    # Vérification du quota gratuit / statut VIP — seulement si une base
+    # de données est configurée (sinon impossible de compter quoi que ce
+    # soit, donc on laisse passer plutôt que de bloquer l'appli).
+    if session:
+        utilisateur = session.get(Utilisateur, telephone)
+        if not _est_vip(utilisateur):
+            deja_utilises = _pronostics_utilises_aujourdhui(session, telephone)
+            if deja_utilises >= LIMITE_GRATUITE_QUOTIDIENNE:
+                raise HTTPException(
+                    429,
+                    f"Limite gratuite de {LIMITE_GRATUITE_QUOTIDIENNE} pronostics par jour "
+                    f"atteinte. Passe en VIP pour un accès illimité.",
+                )
+
     stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
         _stats_toutes_sources(requete.equipe1),
         _stats_toutes_sources(requete.equipe2),
@@ -196,6 +254,7 @@ async def analyser_match(
     if session:
         try:
             enregistrement = Pronostic(
+                telephone=telephone,
                 equipe1=resultat["equipe1"],
                 equipe2=resultat["equipe2"],
                 type_match=requete.typeMatch,
@@ -211,6 +270,91 @@ async def analyser_match(
             session.rollback()
 
     return resultat
+
+
+class PaiementRequest(BaseModel):
+    telephone: str
+    reseau: str  # "TMONEY" ou "FLOOZ"
+
+
+class ConfirmationRequest(BaseModel):
+    telephone: str
+    txReference: str
+
+
+@app.get("/vip/statut")
+def vip_statut(telephone: str, session: Optional[Session] = Depends(db.get_session)):
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    telephone = _normaliser_telephone(telephone)
+    utilisateur = session.get(Utilisateur, telephone)
+    vip = _est_vip(utilisateur)
+
+    return {
+        "vip": vip,
+        "vipExpireLe": utilisateur.vip_expire_le.isoformat() if (utilisateur and utilisateur.vip_expire_le) else None,
+        "pronosticsUtilisesAujourdhui": _pronostics_utilises_aujourdhui(session, telephone),
+        "limiteQuotidienneGratuite": LIMITE_GRATUITE_QUOTIDIENNE,
+    }
+
+
+@app.post("/vip/payer")
+async def vip_payer(requete: PaiementRequest):
+    """
+    Lance un paiement Mobile Money via paygate-api (même service que
+    LotoPredict). `reseau` doit valoir "TMONEY" ou "FLOOZ".
+    """
+    if requete.reseau not in ("TMONEY", "FLOOZ"):
+        raise HTTPException(400, "reseau doit être 'TMONEY' ou 'FLOOZ'")
+
+    telephone = _normaliser_telephone(requete.telephone)
+    reference = await paygate.initier_paiement(telephone, PRIX_VIP_FCFA, requete.reseau)
+    if not reference:
+        raise HTTPException(502, "Paiement non initialisé — service de paiement indisponible")
+
+    return {"txReference": reference, "montant": PRIX_VIP_FCFA, "dureeJours": DUREE_VIP_JOURS}
+
+
+@app.post("/vip/confirmer")
+async def vip_confirmer(
+    requete: ConfirmationRequest, session: Optional[Session] = Depends(db.get_session)
+):
+    """
+    À appeler après /vip/payer, typiquement en interrogeant régulièrement
+    (même logique que LotoPredict), pour vérifier si le paiement a été
+    validé et activer le VIP le cas échéant.
+    """
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    confirme = await paygate.verifier_paiement(requete.txReference)
+    if not confirme:
+        return {"confirme": False}
+
+    telephone = _normaliser_telephone(requete.telephone)
+    utilisateur = session.get(Utilisateur, telephone)
+    maintenant = datetime.utcnow()
+
+    # Si déjà VIP et pas encore expiré, on prolonge à partir de la date
+    # d'expiration actuelle (pas de jours payés perdus en cas de
+    # renouvellement anticipé). Sinon on repart de maintenant.
+    base = (
+        utilisateur.vip_expire_le
+        if (utilisateur and utilisateur.vip_expire_le and utilisateur.vip_expire_le > maintenant)
+        else maintenant
+    )
+    nouvelle_expiration = base + timedelta(days=DUREE_VIP_JOURS)
+
+    if utilisateur:
+        utilisateur.vip_expire_le = nouvelle_expiration
+    else:
+        utilisateur = Utilisateur(telephone=telephone, vip_expire_le=nouvelle_expiration)
+
+    session.add(utilisateur)
+    session.commit()
+
+    return {"confirme": True, "vipExpireLe": nouvelle_expiration.isoformat()}
 
 
 def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
@@ -343,3 +487,107 @@ async def tache_verifier_resultats(
         "pronostics_examines": len(en_attente),
         "nouvellement_verifies": nouvellement_verifies,
     }
+
+
+# ==== Codes VIP (porte dérobée admin) ====
+
+class GenererCodeRequest(BaseModel):
+    duree_jours: int
+    mot_de_passe_admin: str
+
+
+class ActiverCodeRequest(BaseModel):
+    telephone: str
+    code: str
+
+
+def _generer_code_aleatoire(longueur: int = 8) -> str:
+    caracteres = string.ascii_uppercase + string.digits
+    return "".join(random.choice(caracteres) for _ in range(longueur))
+
+
+@app.post("/admin/codes-vip")
+def admin_generer_code(
+    requete: GenererCodeRequest, session: Optional[Session] = Depends(db.get_session)
+):
+    """
+    Génère un code VIP activable manuellement — porte dérobée pour les cas
+    où le paiement automatique ne fonctionne pas (même logique que
+    l'admin panel de LotoPredict).
+    """
+    if requete.mot_de_passe_admin != MOT_DE_PASSE_ADMIN:
+        raise HTTPException(403, "Mot de passe admin incorrect")
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+    if requete.duree_jours <= 0:
+        raise HTTPException(400, "duree_jours doit être positif")
+
+    # Génère jusqu'à ce qu'un code non déjà utilisé soit trouvé (collision
+    # quasi impossible avec 8 caractères alphanumériques, mais on se
+    # protège quand même).
+    for _ in range(5):
+        code = _generer_code_aleatoire()
+        if not session.get(CodeVip, code):
+            break
+    else:
+        raise HTTPException(500, "Impossible de générer un code unique, réessaie")
+
+    entree = CodeVip(code=code, duree_jours=requete.duree_jours)
+    session.add(entree)
+    session.commit()
+
+    return {"code": code, "dureeJours": requete.duree_jours}
+
+
+@app.get("/admin/codes-vip")
+def admin_lister_codes(
+    mot_de_passe_admin: str, session: Optional[Session] = Depends(db.get_session)
+):
+    if mot_de_passe_admin != MOT_DE_PASSE_ADMIN:
+        raise HTTPException(403, "Mot de passe admin incorrect")
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    codes = session.exec(select(CodeVip).order_by(CodeVip.cree_le.desc())).all()
+    return codes
+
+
+@app.post("/vip/activer-code")
+def vip_activer_code(
+    requete: ActiverCodeRequest, session: Optional[Session] = Depends(db.get_session)
+):
+    """Active le VIP à partir d'un code généré par l'admin (activation manuelle)."""
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    entree_code = session.get(CodeVip, requete.code.strip().upper())
+    if not entree_code:
+        raise HTTPException(404, "Code invalide")
+    if entree_code.utilise:
+        raise HTTPException(409, "Ce code a déjà été utilisé")
+
+    telephone = _normaliser_telephone(requete.telephone)
+    maintenant = datetime.utcnow()
+
+    utilisateur = session.get(Utilisateur, telephone)
+    base = (
+        utilisateur.vip_expire_le
+        if (utilisateur and utilisateur.vip_expire_le and utilisateur.vip_expire_le > maintenant)
+        else maintenant
+    )
+    nouvelle_expiration = base + timedelta(days=entree_code.duree_jours)
+
+    if utilisateur:
+        utilisateur.vip_expire_le = nouvelle_expiration
+    else:
+        utilisateur = Utilisateur(telephone=telephone, vip_expire_le=nouvelle_expiration)
+
+    entree_code.utilise = True
+    entree_code.telephone_utilisateur = telephone
+    entree_code.utilise_le = maintenant
+
+    session.add(utilisateur)
+    session.add(entree_code)
+    session.commit()
+
+    return {"active": True, "vipExpireLe": nouvelle_expiration.isoformat()}

@@ -12,6 +12,7 @@ fonctionner normalement.
 import os
 from typing import Generator, Optional
 from sqlmodel import SQLModel, Session, create_engine
+from sqlalchemy import inspect, text
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -30,6 +31,42 @@ def base_de_donnees_configuree() -> bool:
 def creer_tables() -> None:
     if engine:
         SQLModel.metadata.create_all(engine)
+
+
+def migrer_schema() -> None:
+    """
+    Migration légère et idempotente (pas d'Alembic ici, volontairement
+    simple) : ajoute les colonnes manquantes sur des tables qui
+    existaient DÉJÀ avant l'ajout d'un nouveau champ au modèle.
+
+    `create_all()` ne crée que les tables totalement absentes — il ne
+    modifie jamais une table déjà existante. Sans cette étape, une table
+    créée avant l'introduction d'un champ garde l'ancien schéma en base,
+    ce qui provoque une erreur SQL (colonne inexistante) à la moindre
+    requête qui y fait référence.
+    """
+    if not engine:
+        return
+
+    inspecteur = inspect(engine)
+    tables_existantes = inspecteur.get_table_names()
+
+    colonnes_a_verifier = {
+        "pronostic": [("telephone", "VARCHAR")],
+    }
+
+    with engine.connect() as connexion:
+        for nom_table, colonnes in colonnes_a_verifier.items():
+            if nom_table not in tables_existantes:
+                continue  # table entièrement nouvelle : create_all() s'en charge déjà
+
+            colonnes_presentes = {c["name"] for c in inspecteur.get_columns(nom_table)}
+            for nom_colonne, type_sql in colonnes:
+                if nom_colonne not in colonnes_presentes:
+                    connexion.execute(
+                        text(f"ALTER TABLE {nom_table} ADD COLUMN {nom_colonne} {type_sql}")
+                    )
+                    connexion.commit()
 
 
 def get_session() -> Generator[Optional[Session], None, None]:
