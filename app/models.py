@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 
 class MatchAnalysisRequest(BaseModel):
@@ -29,3 +29,5 @@ class MatchAnalysisResponse(BaseModel):
     probabiliteOver15: float
     probabiliteOver25: float
     scoresProbables: List[ScoreProbable]
+    vip: bool  # true si l'utilisateur a accès aux marchés avancés (au-delà du 1X2)
+    pronosticsRestantsAujourdhui: Optional[int] = None  # null si VIP (illimité) ou DB non configurée

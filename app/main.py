@@ -231,12 +231,17 @@ async def analyser_match(
 ):
     telephone = _normaliser_telephone(requete.telephone)
 
+    est_vip = False
+    pronostics_restants: Optional[int] = None
+
     # Vérification du quota gratuit / statut VIP — seulement si une base
     # de données est configurée (sinon impossible de compter quoi que ce
-    # soit, donc on laisse passer plutôt que de bloquer l'appli).
+    # soit, donc on laisse passer en illimité plutôt que de bloquer l'appli).
     if session:
         utilisateur = session.get(Utilisateur, telephone)
-        if not _est_vip(utilisateur):
+        est_vip = _est_vip(utilisateur)
+
+        if not est_vip:
             deja_utilises = _pronostics_utilises_aujourdhui(session, telephone)
             if deja_utilises >= LIMITE_GRATUITE_QUOTIDIENNE:
                 raise HTTPException(
@@ -244,6 +249,8 @@ async def analyser_match(
                     f"Limite gratuite de {LIMITE_GRATUITE_QUOTIDIENNE} pronostics par jour "
                     f"atteinte. Passe en VIP pour un accès illimité.",
                 )
+            # +1 car cette requête, si elle aboutit, va compter comme utilisée
+            pronostics_restants = LIMITE_GRATUITE_QUOTIDIENNE - deja_utilises - 1
 
     stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
         _stats_toutes_sources(requete.equipe1),
@@ -259,6 +266,8 @@ async def analyser_match(
         stats2_sources,
         elo_confrontation=elo_confrontation,
     )
+    resultat["vip"] = est_vip
+    resultat["pronosticsRestantsAujourdhui"] = pronostics_restants
 
     if session:
         try:
