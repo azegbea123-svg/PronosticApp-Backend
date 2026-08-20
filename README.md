@@ -168,11 +168,27 @@ souci, ça n'empêche jamais de recevoir la réponse).
 - `GET /historique/stats` — taux de réussite global une fois des
   pronostics vérifiés
 
-⚠️ **Saisie manuelle pour l'instant** : il n'y a pas encore de
-vérification automatique (qui irait re-scraper le score final du match
-une fois celui-ci terminé). C'est la suite logique une fois que le
-reste est stable — pour l'instant, `PATCH /historique/{id}` doit être
-appelé à la main (ou depuis l'appli, à construire) après chaque match.
+⚠️ **Vérification automatique disponible** : `POST /taches/verifier-resultats`
+regarde, pour chaque pronostic en attente, si le dernier match TERMINÉ de
+l'équipe 1 était bien contre l'équipe 2 — si oui, enregistre le résultat
+tout seul. Render (plan gratuit) n'ayant pas de tâche planifiée intégrée,
+il faut un déclencheur externe gratuit pour l'appeler périodiquement :
+
+1. Va sur [cron-job.org](https://cron-job.org) (gratuit, inscription simple)
+2. Crée un nouveau cron job :
+   - URL : `https://pronosticapp-backend.onrender.com/taches/verifier-resultats`
+   - Méthode : `POST`
+   - Fréquence : toutes les 3-4 heures suffit largement
+3. C'est tout — chaque appel externe vérifie ce qui peut l'être, et
+   laisse le reste en attente pour le passage suivant
+
+Bonus : cet appel périodique maintient aussi le service éveillé sur le
+plan gratuit de Render (qui s'endort sinon après 15 min sans trafic).
+
+`PATCH /historique/{id}?resultat_reel=...` reste disponible en
+complément pour corriger un cas raté manuellement (ex: l'équipe a
+disputé un autre match entre-temps et l'automatisation s'est trompée de
+match).
 
 **Base de données** : `render.yaml` déclare maintenant une base Postgres
 gratuite liée automatiquement au service. Après avoir poussé ces

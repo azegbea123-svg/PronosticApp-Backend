@@ -8,6 +8,11 @@ class MatchAnalysisRequest(BaseModel):
     typeMatch: str
 
 
+class ScoreProbable(BaseModel):
+    score: str
+    probabilite: float
+
+
 class MatchAnalysisResponse(BaseModel):
     equipe1: str
     equipe2: str
@@ -16,3 +21,10 @@ class MatchAnalysisResponse(BaseModel):
     probabiliteVictoireEquipe2: float
     facteursCles: List[str]
     resumeAnalyse: str
+    butsAttendusEquipe1: float
+    butsAttendusEquipe2: float
+    probabiliteBTTS: float
+    probabiliteOver05: float
+    probabiliteOver15: float
+    probabiliteOver25: float
+    scoresProbables: List[ScoreProbable]

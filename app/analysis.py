@@ -93,22 +93,50 @@ def _poisson(k: int, lam: float) -> float:
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
 
 
-def _probabilites_1x2(lambda_dom: float, lambda_ext: float) -> Tuple[float, float, float]:
-    p_dom = p_nul = p_ext = 0.0
+def _grille_scores(lambda_dom: float, lambda_ext: float) -> Dict[Tuple[int, int], float]:
+    """Probabilité de chaque score exact possible (0-0, 1-0, ..., 6-6), normalisée à 1.0 au total."""
+    grille: Dict[Tuple[int, int], float] = {}
     for i in range(MAX_BUTS_SIMULES + 1):
         for j in range(MAX_BUTS_SIMULES + 1):
-            p = _poisson(i, lambda_dom) * _poisson(j, lambda_ext)
-            if i > j:
-                p_dom += p
-            elif i == j:
-                p_nul += p
-            else:
-                p_ext += p
+            grille[(i, j)] = _poisson(i, lambda_dom) * _poisson(j, lambda_ext)
 
-    total = p_dom + p_nul + p_ext
+    total = sum(grille.values())
     if total == 0:
-        return 1 / 3, 1 / 3, 1 / 3
-    return p_dom / total, p_nul / total, p_ext / total
+        return grille
+    return {score: p / total for score, p in grille.items()}
+
+
+def _probabilites_1x2(grille: Dict[Tuple[int, int], float]) -> Tuple[float, float, float]:
+    p_dom = sum(p for (i, j), p in grille.items() if i > j)
+    p_nul = sum(p for (i, j), p in grille.items() if i == j)
+    p_ext = sum(p for (i, j), p in grille.items() if i < j)
+    return p_dom, p_nul, p_ext
+
+
+def _marches_supplementaires(grille: Dict[Tuple[int, int], float]) -> Dict[str, Any]:
+    """
+    Dérive les marchés de paris courants (over/under, BTTS, scores les
+    plus probables) de la MÊME grille de scores déjà calculée pour le
+    1X2 — aucun calcul supplémentaire lourd, juste une autre lecture des
+    mêmes probabilités.
+    """
+    btts = sum(p for (i, j), p in grille.items() if i >= 1 and j >= 1)
+    over_05 = sum(p for (i, j), p in grille.items() if i + j > 0.5)
+    over_15 = sum(p for (i, j), p in grille.items() if i + j > 1.5)
+    over_25 = sum(p for (i, j), p in grille.items() if i + j > 2.5)
+
+    top_scores = sorted(grille.items(), key=lambda item: item[1], reverse=True)[:3]
+    scores_probables = [
+        {"score": f"{i}-{j}", "probabilite": round(p, 3)} for (i, j), p in top_scores
+    ]
+
+    return {
+        "probabiliteBTTS": round(btts, 3),
+        "probabiliteOver05": round(over_05, 3),
+        "probabiliteOver15": round(over_15, 3),
+        "probabiliteOver25": round(over_25, 3),
+        "scoresProbables": scores_probables,
+    }
 
 
 def _facteurs(nom: str, stats: Optional[Dict[str, Any]]) -> List[str]:
@@ -177,7 +205,9 @@ def generer_pronostic(
     lambda1 *= facteur_elo1
     lambda2 *= facteur_elo2
 
-    p1, p_nul, p2 = _probabilites_1x2(lambda1, lambda2)
+    grille = _grille_scores(lambda1, lambda2)
+    p1, p_nul, p2 = _probabilites_1x2(grille)
+    marches = _marches_supplementaires(grille)
 
     facteurs = _facteurs(equipe1, stats1) + _facteurs(equipe2, stats2)
 
@@ -222,4 +252,7 @@ def generer_pronostic(
         "probabiliteVictoireEquipe2": round(p2, 3),
         "facteursCles": facteurs,
         "resumeAnalyse": resume,
+        "butsAttendusEquipe1": round(lambda1, 2),
+        "butsAttendusEquipe2": round(lambda2, 2),
+        **marches,
     }

@@ -157,10 +157,20 @@ async def _stats_toutes_sources(nom_equipe: str) -> List[Dict[str, Any]]:
 
 
 async def _elo_confrontation_sure(equipe1: str, equipe2: str) -> Optional[Dict[str, Any]]:
-    """Ne fait jamais planter la requête si la recherche d'ELO échoue."""
+    """
+    Ne fait jamais planter la requête si la recherche d'ELO échoue, et ne
+    la laisse jamais traîner trop longtemps : cette recherche peut
+    déclencher jusqu'à 3 requêtes HTTP en cascade (page équipe 1, page
+    équipe 2 en repli, page d'analyse) — sans borne globale, ça pouvait
+    faire dépasser les 30-40 secondes dans le pire cas et provoquer des
+    timeouts côté appli. Plafonné ici à 12 secondes au total : au-delà,
+    on abandonne ce signal plutôt que de faire attendre l'utilisateur.
+    """
     try:
-        return await besoccer.get_elo_confrontation(equipe1, equipe2)
-    except Exception:
+        return await asyncio.wait_for(
+            besoccer.get_elo_confrontation(equipe1, equipe2), timeout=12.0
+        )
+    except (asyncio.TimeoutError, Exception):
         return None
 
 
@@ -267,4 +277,69 @@ def stats_fiabilite(session: Optional[Session] = Depends(db.get_session)):
         "total_pronostics_verifies": total,
         "pronostics_corrects": corrects,
         "taux_reussite": round(corrects / total, 3) if total > 0 else None,
+    }
+
+
+async def _verifier_un_pronostic(session: Session, p: Pronostic) -> bool:
+    """
+    Tente de vérifier UN pronostic en re-consultant BeSoccer. Renvoie True
+    s'il a effectivement pu être vérifié à cette occasion (résultat trouvé
+    et enregistré), False sinon (match pas encore joué, ou dernier match
+    de l'équipe contre quelqu'un d'autre pour l'instant).
+    """
+    resultat_equipe1 = await besoccer.verifier_dernier_match(p.equipe1, p.equipe2)
+    if resultat_equipe1 is None:
+        return False
+
+    correspondance = {"V": "V1", "N": "NUL", "D": "V2"}
+    resultat_reel = correspondance[resultat_equipe1]
+    predit = _resultat_predit(p.probabilite_v1, p.probabilite_nul, p.probabilite_v2)
+
+    p.resultat_reel = resultat_reel
+    p.verifie = True
+    p.correct = predit == resultat_reel
+
+    session.add(p)
+    session.commit()
+    return True
+
+
+@app.post("/taches/verifier-resultats")
+async def tache_verifier_resultats(
+    limite: int = 20, session: Optional[Session] = Depends(db.get_session)
+):
+    """
+    Vérification AUTOMATIQUE des pronostics en attente — à appeler
+    périodiquement par un déclencheur externe (ex: cron-job.org, gratuit,
+    aucune inscription compliquée). Render (plan gratuit) n'a pas de tâche
+    planifiée intégrée, d'où ce endpoint déclenché de l'extérieur.
+
+    Pour chaque pronostic pas encore vérifié : regarde si le dernier match
+    TERMINÉ de l'équipe 1 était bien contre l'équipe 2. Si oui, enregistre
+    le résultat automatiquement. Sinon, laisse le pronostic en attente
+    pour le prochain passage (le match n'a probablement pas encore eu lieu).
+
+    Bonus involontaire : cet appel externe périodique maintient aussi le
+    service éveillé sur le plan gratuit de Render (qui s'endort sinon
+    après 15 minutes sans trafic).
+    """
+    if not session:
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    en_attente = session.exec(
+        select(Pronostic).where(Pronostic.verifie == False).limit(limite)  # noqa: E712
+    ).all()
+
+    nouvellement_verifies = 0
+    for p in en_attente:
+        try:
+            if await _verifier_un_pronostic(session, p):
+                nouvellement_verifies += 1
+        except Exception:
+            # Un souci sur un pronostic ne doit pas bloquer les suivants
+            continue
+
+    return {
+        "pronostics_examines": len(en_attente),
+        "nouvellement_verifies": nouvellement_verifies,
     }
