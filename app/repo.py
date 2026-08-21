@@ -74,21 +74,52 @@ def pronostics_utilises_aujourdhui(uid: str) -> int:
         return 0
 
     debut_jour = _debut_journee()
-    # Filtre uniquement sur uid (égalité simple, pas de composite
-    # nécessaire) puis on compte côté Python ceux du jour.
-    docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
-    return sum(1 for d in docs if (d.get("cree_le") or debut_jour) >= debut_jour)
+
+    # Filtrage DIRECTEMENT côté Firestore (uid + date) — beaucoup plus
+    # rapide que tout récupérer et filtrer en Python, et surtout ne
+    # ralentit pas au fil du temps à mesure que l'historique grossit.
+    # Nécessite un index composite (uid + cree_le) — Firestore le
+    # signale avec un lien direct pour le créer en un clic si absent.
+    try:
+        query = (
+            client.collection(COLLECTION_PRONOSTICS)
+            .where("uid", "==", uid)
+            .where("cree_le", ">=", debut_jour)
+        )
+        return len(list(query.stream()))
+    except Exception:
+        # Repli : l'ancienne méthode (plus lente mais fonctionne toujours
+        # sans configuration Firestore supplémentaire)
+        docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
+        return sum(1 for d in docs if (d.get("cree_le") or debut_jour) >= debut_jour)
 
 
 def lister_historique_utilisateur(uid: str, limite: int = 20) -> List[Dict[str, Any]]:
     """
-    Historique PERSONNEL d'un utilisateur — filtre par égalité sur uid
-    uniquement (pas de tri Firestore combiné, pour éviter un index
-    composite), le tri par date le plus récent se fait ensuite en Python.
+    Historique PERSONNEL d'un utilisateur. Essaie d'abord un tri
+    directement côté Firestore (rapide, ne récupère que ce qui est
+    nécessaire) ; si l'index composite correspondant n'existe pas encore,
+    retombe sur l'ancienne méthode (tout récupérer puis trier en Python).
     """
     client = db.get_client()
     if not client:
         return []
+
+    try:
+        query = (
+            client.collection(COLLECTION_PRONOSTICS)
+            .where("uid", "==", uid)
+            .order_by("cree_le", direction="DESCENDING")
+            .limit(limite)
+        )
+        resultats = []
+        for doc in query.stream():
+            d = doc.to_dict()
+            d["id"] = doc.id
+            resultats.append(d)
+        return resultats
+    except Exception:
+        pass
 
     docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
     resultats = []
