@@ -267,6 +267,17 @@ def maj_profil(requete: ProfilRequest, uid: str = Depends(auth.utilisateur_coura
     return {"ok": True}
 
 
+_MOIS_FR = [
+    "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+]
+
+
+def _formater_date_fr(dt: datetime) -> str:
+    """Formate une date en français sans dépendre de la locale du serveur (peu fiable)."""
+    return f"{dt.day} {_MOIS_FR[dt.month - 1]} {dt.year} à {dt.hour:02d}:{dt.minute:02d}"
+
+
 @app.get("/vip/statut")
 def vip_statut(uid: str = Depends(auth.utilisateur_courant)):
     if not db.get_client():
@@ -274,10 +285,21 @@ def vip_statut(uid: str = Depends(auth.utilisateur_courant)):
 
     utilisateur = repo.obtenir_utilisateur(uid)
     vip = repo.est_vip(utilisateur)
+    expire_le = utilisateur.get("vip_expire_le") if utilisateur else None
+
+    jours_restants = None
+    expire_le_affichage = None
+    if vip and expire_le:
+        delta = expire_le - datetime.now(timezone.utc)
+        # +1 pour arrondir "vers le haut" : il reste un peu de la journée en cours en plus
+        jours_restants = max(0, delta.days + (1 if delta.seconds > 0 else 0))
+        expire_le_affichage = _formater_date_fr(expire_le)
 
     return {
         "vip": vip,
-        "vipExpireLe": utilisateur["vip_expire_le"].isoformat() if (utilisateur and utilisateur.get("vip_expire_le")) else None,
+        "vipExpireLe": expire_le.isoformat() if expire_le else None,
+        "vipExpireLeAffichage": expire_le_affichage,
+        "vipJoursRestants": jours_restants,
         "pronosticsUtilisesAujourdhui": repo.pronostics_utilises_aujourdhui(uid),
         "limiteQuotidienneGratuite": LIMITE_GRATUITE_QUOTIDIENNE,
     }
