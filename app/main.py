@@ -74,11 +74,13 @@ async def debug_elo(equipe1: str, equipe2: str):
 @app.post("/debug/verifier-clubs")
 async def debug_verifier_clubs(noms: List[str]):
     """
-    🔧 Vérifie en masse une liste de noms de clubs contre BeSoccer,
-    directement depuis ce serveur (qui a un vrai accès réseau à
-    besoccer.com, contrairement à l'environnement de développement).
-    Renvoie uniquement ceux qui échouent — pas la peine de committer
-    les corrections pour ceux qui marchent déjà.
+    🔧 Vérifie en masse une liste de noms de clubs contre BeSoccer.
+
+    ⚠️ Volontairement LENT (petits lots + pause entre chaque) — un test
+    en rafale de 150 clubs a déjà déclenché un blocage temporaire côté
+    BeSoccer, faussant les résultats (même "Real Madrid", pourtant
+    fiable, avait échoué). Mieux vaut quelques minutes de plus qu'une
+    liste d'échecs polluée de faux positifs.
     """
     resultats_echecs = []
 
@@ -90,12 +92,12 @@ async def debug_verifier_clubs(noms: List[str]):
         except Exception as e:
             resultats_echecs.append({"nom": nom, "raison": f"{type(e).__name__}: {e}"})
 
-    # Par lots de 8 en parallèle — assez rapide sans bombarder BeSoccer
-    # de centaines de requêtes simultanées (risque de blocage).
-    taille_lot = 8
+    taille_lot = 3
     for i in range(0, len(noms), taille_lot):
         lot = noms[i : i + taille_lot]
         await asyncio.gather(*[_verifier_un(nom) for nom in lot])
+        if i + taille_lot < len(noms):
+            await asyncio.sleep(2.0)  # pause entre les lots pour rester discret
 
     return {
         "total_verifies": len(noms),
