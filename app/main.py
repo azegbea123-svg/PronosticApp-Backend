@@ -5,7 +5,7 @@ import string
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -15,6 +15,7 @@ from .analysis import generer_pronostic
 from . import db
 from . import repo
 from . import paygate
+from . import auth
 
 # 💎 Config VIP — modifiable directement ici.
 PRIX_VIP_FCFA = 500
@@ -167,18 +168,16 @@ def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
 
 
 @app.post("/match/analyse", response_model=MatchAnalysisResponse)
-async def analyser_match(requete: MatchAnalysisRequest):
-    telephone = _normaliser_telephone(requete.telephone)
-
+async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.utilisateur_courant)):
     est_vip = False
     pronostics_restants: Optional[int] = None
 
     if db.get_client():
-        utilisateur = repo.obtenir_utilisateur(telephone)
+        utilisateur = repo.obtenir_utilisateur(uid)
         est_vip = repo.est_vip(utilisateur)
 
         if not est_vip:
-            deja_utilises = repo.pronostics_utilises_aujourdhui(telephone)
+            deja_utilises = repo.pronostics_utilises_aujourdhui(uid)
             if deja_utilises >= LIMITE_GRATUITE_QUOTIDIENNE:
                 raise HTTPException(
                     429,
@@ -206,7 +205,7 @@ async def analyser_match(requete: MatchAnalysisRequest):
 
     try:
         repo.enregistrer_pronostic(
-            telephone=telephone,
+            uid=uid,
             equipe1=resultat["equipe1"],
             equipe2=resultat["equipe2"],
             type_match=requete.typeMatch,
@@ -222,35 +221,70 @@ async def analyser_match(requete: MatchAnalysisRequest):
     return resultat
 
 
+class ProfilRequest(BaseModel):
+    telephone: Optional[str] = None
+
+
 class PaiementRequest(BaseModel):
-    telephone: str
+    telephone: str  # requis ici : PayGate a besoin d'un vrai numéro pour débiter
     reseau: str  # "TMONEY" ou "FLOOZ"
 
 
 class ConfirmationRequest(BaseModel):
-    telephone: str
     txReference: str
 
 
-@app.get("/vip/statut")
-def vip_statut(telephone: str):
+@app.get("/profil")
+def obtenir_profil(uid: str = Depends(auth.utilisateur_courant)):
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
-    telephone = _normaliser_telephone(telephone)
-    utilisateur = repo.obtenir_utilisateur(telephone)
+    utilisateur = repo.obtenir_utilisateur(uid) or {}
+    vip = repo.est_vip(utilisateur)
+
+    return {
+        "uid": uid,
+        "email": utilisateur.get("email"),
+        "telephone": utilisateur.get("telephone"),
+        "vip": vip,
+        "vipExpireLe": utilisateur["vip_expire_le"].isoformat() if utilisateur.get("vip_expire_le") else None,
+        "pronosticsUtilisesAujourdhui": repo.pronostics_utilises_aujourdhui(uid),
+        "limiteQuotidienneGratuite": LIMITE_GRATUITE_QUOTIDIENNE,
+    }
+
+
+@app.post("/profil")
+def maj_profil(requete: ProfilRequest, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    Renseigne/actualise le numéro de téléphone du compte — une simple
+    info de contact bonus, jamais l'identifiant du compte.
+    """
+    if not db.get_client():
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    telephone = _normaliser_telephone(requete.telephone) if requete.telephone else None
+    repo.creer_ou_maj_profil(uid, telephone=telephone)
+    return {"ok": True}
+
+
+@app.get("/vip/statut")
+def vip_statut(uid: str = Depends(auth.utilisateur_courant)):
+    if not db.get_client():
+        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    utilisateur = repo.obtenir_utilisateur(uid)
     vip = repo.est_vip(utilisateur)
 
     return {
         "vip": vip,
         "vipExpireLe": utilisateur["vip_expire_le"].isoformat() if (utilisateur and utilisateur.get("vip_expire_le")) else None,
-        "pronosticsUtilisesAujourdhui": repo.pronostics_utilises_aujourdhui(telephone),
+        "pronosticsUtilisesAujourdhui": repo.pronostics_utilises_aujourdhui(uid),
         "limiteQuotidienneGratuite": LIMITE_GRATUITE_QUOTIDIENNE,
     }
 
 
 @app.post("/vip/payer")
-async def vip_payer(requete: PaiementRequest):
+async def vip_payer(requete: PaiementRequest, uid: str = Depends(auth.utilisateur_courant)):
     """Lance un paiement Mobile Money via l'API officielle PayGate Global."""
     if requete.reseau not in ("TMONEY", "FLOOZ"):
         raise HTTPException(400, "reseau doit être 'TMONEY' ou 'FLOOZ'")
@@ -260,11 +294,15 @@ async def vip_payer(requete: PaiementRequest):
     if not reference:
         raise HTTPException(502, "Paiement non initialisé — service de paiement indisponible")
 
+    # Bonus : on garde ce numéro sur le profil pour pouvoir contacter
+    # l'utilisateur au besoin — ça ne devient jamais son identifiant.
+    repo.creer_ou_maj_profil(uid, telephone=telephone)
+
     return {"txReference": reference, "montant": PRIX_VIP_FCFA, "dureeJours": DUREE_VIP_JOURS}
 
 
 @app.post("/vip/confirmer")
-async def vip_confirmer(requete: ConfirmationRequest):
+async def vip_confirmer(requete: ConfirmationRequest, uid: str = Depends(auth.utilisateur_courant)):
     """À appeler après /vip/payer pour vérifier et activer le VIP si payé."""
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
@@ -273,8 +311,7 @@ async def vip_confirmer(requete: ConfirmationRequest):
     if not confirme:
         return {"confirme": False}
 
-    telephone = _normaliser_telephone(requete.telephone)
-    utilisateur = repo.obtenir_utilisateur(telephone)
+    utilisateur = repo.obtenir_utilisateur(uid)
     maintenant = datetime.now(timezone.utc)
 
     base = (
@@ -283,16 +320,17 @@ async def vip_confirmer(requete: ConfirmationRequest):
         else maintenant
     )
     nouvelle_expiration = base + timedelta(days=DUREE_VIP_JOURS)
-    repo.definir_expiration_vip(telephone, nouvelle_expiration)
+    repo.definir_expiration_vip(uid, nouvelle_expiration)
 
     return {"confirme": True, "vipExpireLe": nouvelle_expiration.isoformat()}
 
 
 @app.get("/historique")
-def lister_historique(limite: int = 20):
+def lister_historique(limite: int = 20, uid: str = Depends(auth.utilisateur_courant)):
+    """Historique PERSONNEL de l'utilisateur connecté (plus une vue globale)."""
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
-    return repo.lister_historique(limite)
+    return repo.lister_historique_utilisateur(uid, limite)
 
 
 @app.patch("/historique/{pronostic_id}")
@@ -385,7 +423,6 @@ class GenererCodeRequest(BaseModel):
 
 
 class ActiverCodeRequest(BaseModel):
-    telephone: str
     code: str
 
 
@@ -425,8 +462,8 @@ def admin_lister_codes(mot_de_passe_admin: str):
 
 
 @app.post("/vip/activer-code")
-def vip_activer_code(requete: ActiverCodeRequest):
-    """Active le VIP à partir d'un code généré par l'admin."""
+def vip_activer_code(requete: ActiverCodeRequest, uid: str = Depends(auth.utilisateur_courant)):
+    """Active le VIP sur le compte connecté, à partir d'un code généré par l'admin."""
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
@@ -437,10 +474,9 @@ def vip_activer_code(requete: ActiverCodeRequest):
     if entree_code.get("utilise"):
         raise HTTPException(409, "Ce code a déjà été utilisé")
 
-    telephone = _normaliser_telephone(requete.telephone)
     maintenant = datetime.now(timezone.utc)
 
-    utilisateur = repo.obtenir_utilisateur(telephone)
+    utilisateur = repo.obtenir_utilisateur(uid)
     base = (
         utilisateur["vip_expire_le"]
         if (utilisateur and utilisateur.get("vip_expire_le") and utilisateur["vip_expire_le"] > maintenant)
@@ -448,7 +484,7 @@ def vip_activer_code(requete: ActiverCodeRequest):
     )
     nouvelle_expiration = base + timedelta(days=entree_code["duree_jours"])
 
-    repo.definir_expiration_vip(telephone, nouvelle_expiration)
-    repo.marquer_code_utilise(code, telephone)
+    repo.definir_expiration_vip(uid, nouvelle_expiration)
+    repo.marquer_code_utilise(code, uid)
 
     return {"active": True, "vipExpireLe": nouvelle_expiration.isoformat()}

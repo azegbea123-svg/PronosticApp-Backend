@@ -34,13 +34,14 @@ def _debut_journee():
 # ==== Pronostics ====
 
 def enregistrer_pronostic(
-    telephone: str,
+    uid: str,
     equipe1: str,
     equipe2: str,
     type_match: str,
     probabilite_v1: float,
     probabilite_nul: float,
     probabilite_v2: float,
+    telephone: Optional[str] = None,
 ) -> Optional[str]:
     client = db.get_client()
     if not client:
@@ -49,7 +50,8 @@ def enregistrer_pronostic(
     doc_ref = client.collection(COLLECTION_PRONOSTICS).document()
     doc_ref.set(
         {
-            "telephone": telephone,
+            "uid": uid,
+            "telephone": telephone,  # bonus, juste pour contacter au besoin
             "equipe1": equipe1,
             "equipe2": equipe2,
             "type_match": type_match,
@@ -65,16 +67,37 @@ def enregistrer_pronostic(
     return doc_ref.id
 
 
-def pronostics_utilises_aujourdhui(telephone: str) -> int:
+def pronostics_utilises_aujourdhui(uid: str) -> int:
     client = db.get_client()
     if not client:
         return 0
 
     debut_jour = _debut_journee()
-    # Filtre uniquement sur telephone (égalité simple, pas de composite
+    # Filtre uniquement sur uid (égalité simple, pas de composite
     # nécessaire) puis on compte côté Python ceux du jour.
-    docs = client.collection(COLLECTION_PRONOSTICS).where("telephone", "==", telephone).stream()
+    docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
     return sum(1 for d in docs if (d.get("cree_le") or debut_jour) >= debut_jour)
+
+
+def lister_historique_utilisateur(uid: str, limite: int = 20) -> List[Dict[str, Any]]:
+    """
+    Historique PERSONNEL d'un utilisateur — filtre par égalité sur uid
+    uniquement (pas de tri Firestore combiné, pour éviter un index
+    composite), le tri par date le plus récent se fait ensuite en Python.
+    """
+    client = db.get_client()
+    if not client:
+        return []
+
+    docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
+    resultats = []
+    for doc in docs:
+        d = doc.to_dict()
+        d["id"] = doc.id
+        resultats.append(d)
+
+    resultats.sort(key=lambda d: d.get("cree_le") or _maintenant(), reverse=True)
+    return resultats[:limite]
 
 
 def lister_historique(limite: int = 20) -> List[Dict[str, Any]]:
@@ -148,22 +171,45 @@ def stats_fiabilite() -> Dict[str, Any]:
     return {"total": total, "corrects": corrects}
 
 
-# ==== Utilisateurs (statut VIP) ====
+# ==== Utilisateurs (compte + statut VIP) ====
 
-def obtenir_utilisateur(telephone: str) -> Optional[Dict[str, Any]]:
+def obtenir_utilisateur(uid: str) -> Optional[Dict[str, Any]]:
     client = db.get_client()
     if not client:
         return None
-    doc = client.collection(COLLECTION_UTILISATEURS).document(telephone).get()
+    doc = client.collection(COLLECTION_UTILISATEURS).document(uid).get()
     return doc.to_dict() if doc.exists else None
 
 
-def definir_expiration_vip(telephone: str, expiration: datetime) -> None:
+def creer_ou_maj_profil(uid: str, email: Optional[str] = None, telephone: Optional[str] = None) -> None:
+    """
+    Crée le profil au premier contact, ou met à jour seulement les champs
+    fournis sinon (merge=True — ne touche pas aux autres champs déjà en
+    base, comme le statut VIP).
+    """
     client = db.get_client()
     if not client:
         return
-    client.collection(COLLECTION_UTILISATEURS).document(telephone).set(
-        {"vip_expire_le": expiration, "cree_le": _maintenant()}, merge=True
+
+    donnees: Dict[str, Any] = {}
+    if email is not None:
+        donnees["email"] = email
+    if telephone is not None:
+        donnees["telephone"] = telephone
+
+    if not client.collection(COLLECTION_UTILISATEURS).document(uid).get().exists:
+        donnees["cree_le"] = _maintenant()
+
+    if donnees:
+        client.collection(COLLECTION_UTILISATEURS).document(uid).set(donnees, merge=True)
+
+
+def definir_expiration_vip(uid: str, expiration: datetime) -> None:
+    client = db.get_client()
+    if not client:
+        return
+    client.collection(COLLECTION_UTILISATEURS).document(uid).set(
+        {"vip_expire_le": expiration}, merge=True
     )
 
 
@@ -183,7 +229,7 @@ def creer_code_vip(code: str, duree_jours: int) -> None:
         {
             "duree_jours": duree_jours,
             "utilise": False,
-            "telephone_utilisateur": None,
+            "uid_utilisateur": None,
             "cree_le": _maintenant(),
             "utilise_le": None,
         }
@@ -218,10 +264,10 @@ def lister_codes_vip() -> List[Dict[str, Any]]:
     return resultats
 
 
-def marquer_code_utilise(code: str, telephone: str) -> None:
+def marquer_code_utilise(code: str, uid: str) -> None:
     client = db.get_client()
     if not client:
         return
     client.collection(COLLECTION_CODES_VIP).document(code).update(
-        {"utilise": True, "telephone_utilisateur": telephone, "utilise_le": _maintenant()}
+        {"utilise": True, "uid_utilisateur": uid, "utilise_le": _maintenant()}
     )
