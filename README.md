@@ -154,6 +154,28 @@ Teste ensuite sur un **vrai téléphone** (plus seulement l'émulateur) :
 maintenant que le backend a une URL publique, ça doit fonctionner
 depuis n'importe quel réseau, pas seulement en local.
 
+## Base de données : Firestore (Firebase)
+
+⚠️ Le projet est passé de Postgres (Render) à **Firestore** — plus de
+limite d'expiration à 90 jours, plan gratuit (Spark) largement
+suffisant pour ce volume.
+
+**Configuration requise** :
+1. Un fichier de clé de service Firebase (`firebase-service-account.json`)
+2. En local : place-le à la racine du projet (déjà dans `.gitignore`)
+3. En production sur Render : Dashboard → ton service → **Environment**
+   → section **Secret Files** → ajoute un fichier nommé
+   `firebase-service-account.json` avec le contenu JSON collé dedans.
+   Render le monte automatiquement à `/etc/secrets/...`, le code le
+   trouve tout seul à cet emplacement en prod.
+
+Sans ce fichier (aucun des deux emplacements), l'app démarre quand même
+mais toutes les fonctionnalités liées à la base (historique, VIP, quota)
+répondent avec une erreur claire plutôt que de planter.
+
+**Collections Firestore** : `pronostics`, `utilisateurs`, `codes_vip`
+(pas de schéma à définir à l'avance, Firestore est sans schéma).
+
 ## 5. Historique et fiabilité des pronostics
 
 Chaque appel à `/match/analyse` enregistre automatiquement le pronostic
@@ -186,21 +208,7 @@ Bonus : cet appel périodique maintient aussi le service éveillé sur le
 plan gratuit de Render (qui s'endort sinon après 15 min sans trafic).
 
 `PATCH /historique/{id}?resultat_reel=...` reste disponible en
-complément pour corriger un cas raté manuellement (ex: l'équipe a
-disputé un autre match entre-temps et l'automatisation s'est trompée de
-match).
-
-**Base de données** : `render.yaml` déclare maintenant une base Postgres
-gratuite liée automatiquement au service. Après avoir poussé ces
-changements sur GitHub, si Render ne détecte pas le nouveau `render.yaml`
-automatiquement, va sur le dashboard Render → ton Blueprint → **"Sync"**
-pour forcer la prise en compte de la nouvelle base et de la variable
-`DATABASE_URL`.
-
-⚠️ **Rappel** : ce plan Postgres gratuit expire au bout de **90 jours**
-— pense à surveiller la date d'expiration dans le dashboard Render, ou à
-migrer vers une base externe (Neon, Supabase) avant cette échéance si tu
-veux garder l'historique.
+complément pour corriger un cas raté manuellement.
 
 ## Limites connues
 

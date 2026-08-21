@@ -2,19 +2,18 @@ import asyncio
 import os
 import random
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlmodel import Session, select
 
 from .models import MatchAnalysisRequest, MatchAnalysisResponse
 from .sources import sofascore, besoccer, flashscore
 from .analysis import generer_pronostic
-from .db_models import Pronostic, Utilisateur, CodeVip
 from . import db
+from . import repo
 from . import paygate
 
 # 💎 Config VIP — modifiable directement ici.
@@ -29,29 +28,35 @@ MOT_DE_PASSE_ADMIN = os.environ.get("ADMIN_PASSWORD", "change-moi")
 
 app = FastAPI(title="PronosticApp API")
 
-
-@app.on_event("startup")
-def au_demarrage():
-    try:
-        db.creer_tables()  # ne fait rien si DATABASE_URL n'est pas configurée
-    except Exception as e:
-        print(f"⚠️ Erreur lors de la création des tables (non bloquante) : {e}")
-    try:
-        db.migrer_schema()  # ajoute les colonnes manquantes sur les tables déjà existantes
-    except Exception as e:
-        # Un souci de migration ne doit JAMAIS empêcher l'appli de démarrer
-        # (mieux vaut tourner avec un schéma partiellement à jour que ne
-        # pas tourner du tout — et ça évite un 502 permanent).
-        print(f"⚠️ Erreur lors de la migration de schéma (non bloquante) : {e}")
-
 # CORS ouvert : simple pour un backend consommé uniquement par l'appli Android.
-# À restreindre si un jour ce backend est aussi appelé depuis un site web public.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/")
+async def health():
+    """Endpoint de santé, utile pour vérifier que le déploiement fonctionne."""
+    return {"status": "ok", "service": "PronosticApp API"}
+
+
+@app.get("/debug/db")
+def debug_db():
+    """🔧 Diagnostic : état réel de la connexion Firestore."""
+    client = db.get_client()
+    resultat: Dict[str, Any] = {"firestore_configure": client is not None}
+    if client:
+        try:
+            historique = repo.lister_historique(limite=1)
+            resultat["connexion_ok"] = True
+            resultat["exemple_lecture_ok"] = True
+        except Exception as e:
+            resultat["connexion_ok"] = False
+            resultat["erreur"] = f"{type(e).__name__}: {e}"
+    return resultat
 
 
 @app.get("/debug/elo")
@@ -62,27 +67,6 @@ async def debug_elo(equipe1: str, equipe2: str):
         return {"equipe1": equipe1, "equipe2": equipe2, "resultat": resultat}
     except Exception as e:
         return {"equipe1": equipe1, "equipe2": equipe2, "erreur": f"{type(e).__name__}: {e}"}
-
-
-@app.get("/debug/db")
-def debug_db(session: Optional[Session] = Depends(db.get_session)):
-    """🔧 Diagnostic temporaire : état réel de la connexion base de données."""
-    resultat: Dict[str, Any] = {
-        "DATABASE_URL_definie": bool(db.DATABASE_URL),
-        "engine_cree": db.engine is not None,
-        "session_disponible": session is not None,
-    }
-
-    if session is not None:
-        try:
-            nb_lignes = len(session.exec(select(Pronostic)).all())
-            resultat["connexion_ok"] = True
-            resultat["nb_pronostics_en_base"] = nb_lignes
-        except Exception as e:
-            resultat["connexion_ok"] = False
-            resultat["erreur"] = f"{type(e).__name__}: {e}"
-
-    return resultat
 
 
 @app.get("/debug/besoccer")
@@ -103,13 +87,11 @@ async def debug_besoccer(equipe: str):
             try:
                 r = await client.get(url, headers=HEADERS, timeout=10.0)
                 essai: Dict[str, Any] = {"url": url, "status_code": r.status_code}
-
                 if r.status_code == 200:
                     stats = _extraire_forme_recente(r.text)
                     essai["stats_extraites"] = stats
                     resultat["essais"].append(essai)
                     break
-
                 resultat["essais"].append(essai)
             except Exception as e:
                 resultat["essais"].append({"url": url, "erreur": f"{type(e).__name__}: {e}"})
@@ -119,43 +101,25 @@ async def debug_besoccer(equipe: str):
 
 @app.get("/debug/sofascore")
 async def debug_sofascore(equipe: str):
-    """
-    🔧 Endpoint de diagnostic TEMPORAIRE — à retirer une fois le problème
-    de scraping résolu. Permet de voir ce que Sofascore répond réellement
-    depuis le serveur déployé (code HTTP, début du corps de la réponse),
-    sans passer par toute la logique de parsing qui masquerait l'erreur.
-    """
+    """🔧 Diagnostic : Sofascore reste bloqué (403) depuis l'IP de Render, gardé pour vérifier si ça change un jour."""
     import httpx
     from .sources.sofascore import BASE, HEADERS
 
     resultat: Dict[str, Any] = {"equipe": equipe}
-
     async with httpx.AsyncClient() as client:
         try:
-            r = await client.get(
-                f"{BASE}/search/all?q={equipe}", headers=HEADERS, timeout=10.0
-            )
+            r = await client.get(f"{BASE}/search/all?q={equipe}", headers=HEADERS, timeout=10.0)
             resultat["search_status_code"] = r.status_code
             resultat["search_body_extrait"] = r.text[:500]
         except Exception as e:
             resultat["search_erreur"] = f"{type(e).__name__}: {e}"
-
     return resultat
-
-
-@app.get("/")
-async def health():
-    """Endpoint de santé, utile pour vérifier que le déploiement fonctionne."""
-    return {"status": "ok", "service": "PronosticApp API"}
 
 
 async def _stats_toutes_sources(nom_equipe: str) -> List[Dict[str, Any]]:
     """
-    Interroge TOUTES les sources en parallèle (plus seulement la première
-    qui répond) et renvoie la liste de celles qui ont réussi. La fusion
-    (moyennes, cumuls) est faite ensuite dans analysis.py — additionner
-    les compteurs bruts de plusieurs sources est mathématiquement sûr même
-    si elles se recoupent sur les mêmes matchs réels.
+    Interroge TOUTES les sources en parallèle et renvoie la liste de
+    celles qui ont réussi. La fusion est faite ensuite dans analysis.py.
     """
     resultats: List[Dict[str, Any]] = []
 
@@ -165,32 +129,18 @@ async def _stats_toutes_sources(nom_equipe: str) -> List[Dict[str, Any]]:
             if stats:
                 resultats.append(stats)
         except Exception:
-            # Une source qui échoue ne doit jamais faire planter toute la requête
             pass
 
-    # ⚠️ Sofascore est retiré ici : bloqué de façon permanente (403) depuis
-    # l'IP de Render. Le garder ne ferait qu'ajouter un délai d'attente
-    # (timeout) à chaque requête sans jamais réussir. Le module reste
-    # disponible (app/sources/sofascore.py) si un jour le déploiement
-    # change d'hébergeur et que le blocage ne s'applique plus.
+    # ⚠️ Sofascore retiré : bloqué en permanence (403) depuis l'IP de Render.
     await asyncio.gather(
         _essayer(besoccer.get_team_stats),
         _essayer(flashscore.get_team_stats),
     )
-
     return resultats
 
 
 async def _elo_confrontation_sure(equipe1: str, equipe2: str) -> Optional[Dict[str, Any]]:
-    """
-    Ne fait jamais planter la requête si la recherche d'ELO échoue, et ne
-    la laisse jamais traîner trop longtemps : cette recherche peut
-    déclencher jusqu'à 3 requêtes HTTP en cascade (page équipe 1, page
-    équipe 2 en repli, page d'analyse) — sans borne globale, ça pouvait
-    faire dépasser les 30-40 secondes dans le pire cas et provoquer des
-    timeouts côté appli. Plafonné ici à 12 secondes au total : au-delà,
-    on abandonne ce signal plutôt que de faire attendre l'utilisateur.
-    """
+    """Plafonné à 12s : évite qu'une recherche ELO en cascade fasse traîner la requête."""
     try:
         return await asyncio.wait_for(
             besoccer.get_elo_confrontation(equipe1, equipe2), timeout=12.0
@@ -202,54 +152,39 @@ async def _elo_confrontation_sure(equipe1: str, equipe2: str) -> Optional[Dict[s
 def _normaliser_telephone(telephone: str) -> str:
     """
     Normalise un numéro de téléphone en identifiant stable : retire les
-    espaces et le signe '+'. Important car '+' est traditionnellement
-    décodé comme un espace dans une chaîne de requête HTTP — sans cette
-    normalisation, "+22890000000" envoyé en query param pouvait finir
-    par ne plus correspondre au même numéro stocké ailleurs.
-    Ex: "+228 90 00 00 00" -> "22890000000"
+    espaces et le signe '+' (qui peut être mal interprété dans une query
+    string HTTP). Ex: "+228 90 00 00 00" -> "22890000000"
     """
     return telephone.replace(" ", "").replace("+", "").strip()
 
 
-def _est_vip(utilisateur: Optional[Utilisateur]) -> bool:
-    if not utilisateur or not utilisateur.vip_expire_le:
-        return False
-    return utilisateur.vip_expire_le > datetime.utcnow()
-
-
-def _pronostics_utilises_aujourdhui(session: Session, telephone: str) -> int:
-    debut_jour = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    lignes = session.exec(
-        select(Pronostic).where(Pronostic.telephone == telephone, Pronostic.cree_le >= debut_jour)
-    ).all()
-    return len(lignes)
+def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
+    if p_v1 >= p_nul and p_v1 >= p_v2:
+        return "V1"
+    if p_v2 >= p_nul and p_v2 >= p_v1:
+        return "V2"
+    return "NUL"
 
 
 @app.post("/match/analyse", response_model=MatchAnalysisResponse)
-async def analyser_match(
-    requete: MatchAnalysisRequest, session: Optional[Session] = Depends(db.get_session)
-):
+async def analyser_match(requete: MatchAnalysisRequest):
     telephone = _normaliser_telephone(requete.telephone)
 
     est_vip = False
     pronostics_restants: Optional[int] = None
 
-    # Vérification du quota gratuit / statut VIP — seulement si une base
-    # de données est configurée (sinon impossible de compter quoi que ce
-    # soit, donc on laisse passer en illimité plutôt que de bloquer l'appli).
-    if session:
-        utilisateur = session.get(Utilisateur, telephone)
-        est_vip = _est_vip(utilisateur)
+    if db.get_client():
+        utilisateur = repo.obtenir_utilisateur(telephone)
+        est_vip = repo.est_vip(utilisateur)
 
         if not est_vip:
-            deja_utilises = _pronostics_utilises_aujourdhui(session, telephone)
+            deja_utilises = repo.pronostics_utilises_aujourdhui(telephone)
             if deja_utilises >= LIMITE_GRATUITE_QUOTIDIENNE:
                 raise HTTPException(
                     429,
                     f"Limite gratuite de {LIMITE_GRATUITE_QUOTIDIENNE} pronostics par jour "
                     f"atteinte. Passe en VIP pour un accès illimité.",
                 )
-            # +1 car cette requête, si elle aboutit, va compter comme utilisée
             pronostics_restants = LIMITE_GRATUITE_QUOTIDIENNE - deja_utilises - 1
 
     stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
@@ -269,23 +204,20 @@ async def analyser_match(
     resultat["vip"] = est_vip
     resultat["pronosticsRestantsAujourdhui"] = pronostics_restants
 
-    if session:
-        try:
-            enregistrement = Pronostic(
-                telephone=telephone,
-                equipe1=resultat["equipe1"],
-                equipe2=resultat["equipe2"],
-                type_match=requete.typeMatch,
-                probabilite_v1=resultat["probabiliteVictoireEquipe1"],
-                probabilite_nul=resultat["probabiliteMatchNul"],
-                probabilite_v2=resultat["probabiliteVictoireEquipe2"],
-            )
-            session.add(enregistrement)
-            session.commit()
-        except Exception:
-            # L'historique est un bonus : un souci de DB ne doit jamais
-            # empêcher l'utilisateur de recevoir son pronostic.
-            session.rollback()
+    try:
+        repo.enregistrer_pronostic(
+            telephone=telephone,
+            equipe1=resultat["equipe1"],
+            equipe2=resultat["equipe2"],
+            type_match=requete.typeMatch,
+            probabilite_v1=resultat["probabiliteVictoireEquipe1"],
+            probabilite_nul=resultat["probabiliteMatchNul"],
+            probabilite_v2=resultat["probabiliteVictoireEquipe2"],
+        )
+    except Exception:
+        # L'historique est un bonus : un souci de DB ne doit jamais
+        # empêcher l'utilisateur de recevoir son pronostic.
+        pass
 
     return resultat
 
@@ -301,28 +233,25 @@ class ConfirmationRequest(BaseModel):
 
 
 @app.get("/vip/statut")
-def vip_statut(telephone: str, session: Optional[Session] = Depends(db.get_session)):
-    if not session:
+def vip_statut(telephone: str):
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
     telephone = _normaliser_telephone(telephone)
-    utilisateur = session.get(Utilisateur, telephone)
-    vip = _est_vip(utilisateur)
+    utilisateur = repo.obtenir_utilisateur(telephone)
+    vip = repo.est_vip(utilisateur)
 
     return {
         "vip": vip,
-        "vipExpireLe": utilisateur.vip_expire_le.isoformat() if (utilisateur and utilisateur.vip_expire_le) else None,
-        "pronosticsUtilisesAujourdhui": _pronostics_utilises_aujourdhui(session, telephone),
+        "vipExpireLe": utilisateur["vip_expire_le"].isoformat() if (utilisateur and utilisateur.get("vip_expire_le")) else None,
+        "pronosticsUtilisesAujourdhui": repo.pronostics_utilises_aujourdhui(telephone),
         "limiteQuotidienneGratuite": LIMITE_GRATUITE_QUOTIDIENNE,
     }
 
 
 @app.post("/vip/payer")
 async def vip_payer(requete: PaiementRequest):
-    """
-    Lance un paiement Mobile Money via paygate-api (même service que
-    LotoPredict). `reseau` doit valoir "TMONEY" ou "FLOOZ".
-    """
+    """Lance un paiement Mobile Money via l'API officielle PayGate Global."""
     if requete.reseau not in ("TMONEY", "FLOOZ"):
         raise HTTPException(400, "reseau doit être 'TMONEY' ou 'FLOOZ'")
 
@@ -335,15 +264,9 @@ async def vip_payer(requete: PaiementRequest):
 
 
 @app.post("/vip/confirmer")
-async def vip_confirmer(
-    requete: ConfirmationRequest, session: Optional[Session] = Depends(db.get_session)
-):
-    """
-    À appeler après /vip/payer, typiquement en interrogeant régulièrement
-    (même logique que LotoPredict), pour vérifier si le paiement a été
-    validé et activer le VIP le cas échéant.
-    """
-    if not session:
+async def vip_confirmer(requete: ConfirmationRequest):
+    """À appeler après /vip/payer pour vérifier et activer le VIP si payé."""
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
     confirme = await paygate.verifier_paiement(requete.txReference)
@@ -351,89 +274,58 @@ async def vip_confirmer(
         return {"confirme": False}
 
     telephone = _normaliser_telephone(requete.telephone)
-    utilisateur = session.get(Utilisateur, telephone)
-    maintenant = datetime.utcnow()
+    utilisateur = repo.obtenir_utilisateur(telephone)
+    maintenant = datetime.now(timezone.utc)
 
-    # Si déjà VIP et pas encore expiré, on prolonge à partir de la date
-    # d'expiration actuelle (pas de jours payés perdus en cas de
-    # renouvellement anticipé). Sinon on repart de maintenant.
     base = (
-        utilisateur.vip_expire_le
-        if (utilisateur and utilisateur.vip_expire_le and utilisateur.vip_expire_le > maintenant)
+        utilisateur["vip_expire_le"]
+        if (utilisateur and utilisateur.get("vip_expire_le") and utilisateur["vip_expire_le"] > maintenant)
         else maintenant
     )
     nouvelle_expiration = base + timedelta(days=DUREE_VIP_JOURS)
-
-    if utilisateur:
-        utilisateur.vip_expire_le = nouvelle_expiration
-    else:
-        utilisateur = Utilisateur(telephone=telephone, vip_expire_le=nouvelle_expiration)
-
-    session.add(utilisateur)
-    session.commit()
+    repo.definir_expiration_vip(telephone, nouvelle_expiration)
 
     return {"confirme": True, "vipExpireLe": nouvelle_expiration.isoformat()}
 
 
-def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
-    if p_v1 >= p_nul and p_v1 >= p_v2:
-        return "V1"
-    if p_v2 >= p_nul and p_v2 >= p_v1:
-        return "V2"
-    return "NUL"
-
-
 @app.get("/historique")
-def lister_historique(limite: int = 20, session: Optional[Session] = Depends(db.get_session)):
-    if not session:
+def lister_historique(limite: int = 20):
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
-
-    lignes = session.exec(
-        select(Pronostic).order_by(Pronostic.cree_le.desc()).limit(limite)
-    ).all()
-    return lignes
+    return repo.lister_historique(limite)
 
 
 @app.patch("/historique/{pronostic_id}")
-def enregistrer_resultat_reel(
-    pronostic_id: int, resultat_reel: str, session: Optional[Session] = Depends(db.get_session)
-):
+def enregistrer_resultat_reel(pronostic_id: str, resultat_reel: str):
     """
-    Renseigne le résultat réel d'un match une fois connu (saisie manuelle
-    pour l'instant — une vérification automatique via re-scraping des
-    scores finaux est une amélioration possible pour plus tard).
-
+    Renseigne le résultat réel d'un match une fois connu (activation
+    manuelle en complément de la vérification automatique).
     resultat_reel doit valoir "V1", "NUL" ou "V2".
     """
-    if not session:
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
     if resultat_reel not in ("V1", "NUL", "V2"):
         raise HTTPException(400, "resultat_reel doit être 'V1', 'NUL' ou 'V2'")
 
-    ligne = session.get(Pronostic, pronostic_id)
+    ligne = repo.obtenir_pronostic(pronostic_id)
     if not ligne:
         raise HTTPException(404, "Pronostic introuvable")
 
-    predit = _resultat_predit(ligne.probabilite_v1, ligne.probabilite_nul, ligne.probabilite_v2)
+    predit = _resultat_predit(ligne["probabilite_v1"], ligne["probabilite_nul"], ligne["probabilite_v2"])
+    correct = predit == resultat_reel
+    repo.marquer_pronostic_verifie(pronostic_id, resultat_reel, correct)
 
-    ligne.resultat_reel = resultat_reel
-    ligne.verifie = True
-    ligne.correct = predit == resultat_reel
-
-    session.add(ligne)
-    session.commit()
-    session.refresh(ligne)
-    return ligne
+    return {"id": pronostic_id, "resultatReel": resultat_reel, "correct": correct}
 
 
 @app.get("/historique/stats")
-def stats_fiabilite(session: Optional[Session] = Depends(db.get_session)):
-    if not session:
+def stats_fiabilite():
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
-    verifies = session.exec(select(Pronostic).where(Pronostic.verifie == True)).all()  # noqa: E712
-    total = len(verifies)
-    corrects = sum(1 for p in verifies if p.correct)
+    stats = repo.stats_fiabilite()
+    total = stats["total"]
+    corrects = stats["corrects"]
 
     return {
         "total_pronostics_verifies": total,
@@ -442,63 +334,41 @@ def stats_fiabilite(session: Optional[Session] = Depends(db.get_session)):
     }
 
 
-async def _verifier_un_pronostic(session: Session, p: Pronostic) -> bool:
+async def _verifier_un_pronostic(p: Dict[str, Any]) -> bool:
     """
     Tente de vérifier UN pronostic en re-consultant BeSoccer. Renvoie True
-    s'il a effectivement pu être vérifié à cette occasion (résultat trouvé
-    et enregistré), False sinon (match pas encore joué, ou dernier match
-    de l'équipe contre quelqu'un d'autre pour l'instant).
+    si un résultat a été trouvé et enregistré, False sinon (match pas
+    encore joué, ou dernier match contre quelqu'un d'autre pour l'instant).
     """
-    resultat_equipe1 = await besoccer.verifier_dernier_match(p.equipe1, p.equipe2)
+    resultat_equipe1 = await besoccer.verifier_dernier_match(p["equipe1"], p["equipe2"])
     if resultat_equipe1 is None:
         return False
 
     correspondance = {"V": "V1", "N": "NUL", "D": "V2"}
     resultat_reel = correspondance[resultat_equipe1]
-    predit = _resultat_predit(p.probabilite_v1, p.probabilite_nul, p.probabilite_v2)
+    predit = _resultat_predit(p["probabilite_v1"], p["probabilite_nul"], p["probabilite_v2"])
 
-    p.resultat_reel = resultat_reel
-    p.verifie = True
-    p.correct = predit == resultat_reel
-
-    session.add(p)
-    session.commit()
+    repo.marquer_pronostic_verifie(p["id"], resultat_reel, predit == resultat_reel)
     return True
 
 
 @app.post("/taches/verifier-resultats")
-async def tache_verifier_resultats(
-    limite: int = 20, session: Optional[Session] = Depends(db.get_session)
-):
+async def tache_verifier_resultats(limite: int = 20):
     """
     Vérification AUTOMATIQUE des pronostics en attente — à appeler
-    périodiquement par un déclencheur externe (ex: cron-job.org, gratuit,
-    aucune inscription compliquée). Render (plan gratuit) n'a pas de tâche
-    planifiée intégrée, d'où ce endpoint déclenché de l'extérieur.
-
-    Pour chaque pronostic pas encore vérifié : regarde si le dernier match
-    TERMINÉ de l'équipe 1 était bien contre l'équipe 2. Si oui, enregistre
-    le résultat automatiquement. Sinon, laisse le pronostic en attente
-    pour le prochain passage (le match n'a probablement pas encore eu lieu).
-
-    Bonus involontaire : cet appel externe périodique maintient aussi le
-    service éveillé sur le plan gratuit de Render (qui s'endort sinon
-    après 15 minutes sans trafic).
+    périodiquement par un déclencheur externe (ex: cron-job.org).
     """
-    if not session:
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
-    en_attente = session.exec(
-        select(Pronostic).where(Pronostic.verifie == False).limit(limite)  # noqa: E712
-    ).all()
+    en_attente = repo.lister_pronostics_non_verifies(limite)
 
     nouvellement_verifies = 0
     for p in en_attente:
         try:
-            if await _verifier_un_pronostic(session, p):
+            if await _verifier_un_pronostic(p):
                 nouvellement_verifies += 1
         except Exception:
-            # Un souci sur un pronostic ne doit pas bloquer les suivants
             continue
 
     return {
@@ -525,87 +395,60 @@ def _generer_code_aleatoire(longueur: int = 8) -> str:
 
 
 @app.post("/admin/codes-vip")
-def admin_generer_code(
-    requete: GenererCodeRequest, session: Optional[Session] = Depends(db.get_session)
-):
-    """
-    Génère un code VIP activable manuellement — porte dérobée pour les cas
-    où le paiement automatique ne fonctionne pas (même logique que
-    l'admin panel de LotoPredict).
-    """
+def admin_generer_code(requete: GenererCodeRequest):
+    """Génère un code VIP activable manuellement — porte dérobée admin."""
     if requete.mot_de_passe_admin != MOT_DE_PASSE_ADMIN:
         raise HTTPException(403, "Mot de passe admin incorrect")
-    if not session:
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
     if requete.duree_jours <= 0:
         raise HTTPException(400, "duree_jours doit être positif")
 
-    # Génère jusqu'à ce qu'un code non déjà utilisé soit trouvé (collision
-    # quasi impossible avec 8 caractères alphanumériques, mais on se
-    # protège quand même).
     for _ in range(5):
         code = _generer_code_aleatoire()
-        if not session.get(CodeVip, code):
+        if not repo.code_existe(code):
             break
     else:
         raise HTTPException(500, "Impossible de générer un code unique, réessaie")
 
-    entree = CodeVip(code=code, duree_jours=requete.duree_jours)
-    session.add(entree)
-    session.commit()
-
+    repo.creer_code_vip(code, requete.duree_jours)
     return {"code": code, "dureeJours": requete.duree_jours}
 
 
 @app.get("/admin/codes-vip")
-def admin_lister_codes(
-    mot_de_passe_admin: str, session: Optional[Session] = Depends(db.get_session)
-):
+def admin_lister_codes(mot_de_passe_admin: str):
     if mot_de_passe_admin != MOT_DE_PASSE_ADMIN:
         raise HTTPException(403, "Mot de passe admin incorrect")
-    if not session:
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
-
-    codes = session.exec(select(CodeVip).order_by(CodeVip.cree_le.desc())).all()
-    return codes
+    return repo.lister_codes_vip()
 
 
 @app.post("/vip/activer-code")
-def vip_activer_code(
-    requete: ActiverCodeRequest, session: Optional[Session] = Depends(db.get_session)
-):
-    """Active le VIP à partir d'un code généré par l'admin (activation manuelle)."""
-    if not session:
+def vip_activer_code(requete: ActiverCodeRequest):
+    """Active le VIP à partir d'un code généré par l'admin."""
+    if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
-    entree_code = session.get(CodeVip, requete.code.strip().upper())
+    code = requete.code.strip().upper()
+    entree_code = repo.obtenir_code_vip(code)
     if not entree_code:
         raise HTTPException(404, "Code invalide")
-    if entree_code.utilise:
+    if entree_code.get("utilise"):
         raise HTTPException(409, "Ce code a déjà été utilisé")
 
     telephone = _normaliser_telephone(requete.telephone)
-    maintenant = datetime.utcnow()
+    maintenant = datetime.now(timezone.utc)
 
-    utilisateur = session.get(Utilisateur, telephone)
+    utilisateur = repo.obtenir_utilisateur(telephone)
     base = (
-        utilisateur.vip_expire_le
-        if (utilisateur and utilisateur.vip_expire_le and utilisateur.vip_expire_le > maintenant)
+        utilisateur["vip_expire_le"]
+        if (utilisateur and utilisateur.get("vip_expire_le") and utilisateur["vip_expire_le"] > maintenant)
         else maintenant
     )
-    nouvelle_expiration = base + timedelta(days=entree_code.duree_jours)
+    nouvelle_expiration = base + timedelta(days=entree_code["duree_jours"])
 
-    if utilisateur:
-        utilisateur.vip_expire_le = nouvelle_expiration
-    else:
-        utilisateur = Utilisateur(telephone=telephone, vip_expire_le=nouvelle_expiration)
-
-    entree_code.utilise = True
-    entree_code.telephone_utilisateur = telephone
-    entree_code.utilise_le = maintenant
-
-    session.add(utilisateur)
-    session.add(entree_code)
-    session.commit()
+    repo.definir_expiration_vip(telephone, nouvelle_expiration)
+    repo.marquer_code_utilise(code, telephone)
 
     return {"active": True, "vipExpireLe": nouvelle_expiration.isoformat()}

@@ -1,77 +1,58 @@
 """
-Connexion à la base de données (Postgres en prod via Render, mais le code
-fonctionne avec n'importe quelle URL SQLAlchemy — utile pour tester en
-local avec SQLite sans rien installer de plus).
+Connexion Firestore — remplace l'ancienne couche Postgres/SQLModel.
+Fini l'expiration à 90 jours du plan Postgres gratuit de Render.
 
-Si DATABASE_URL n'est pas définie (ex: développement local sans DB liée),
-l'app démarre quand même : les fonctionnalités d'historique renvoient une
-erreur claire au lieu de planter, mais /match/analyse continue de
-fonctionner normalement.
+Recherche le fichier de clé de service à deux emplacements possibles :
+  - En production sur Render : /etc/secrets/firebase-service-account.json
+    (Secret File Render, jamais commité sur Git)
+  - En local : firebase-service-account.json à la racine du projet
+    (listé dans .gitignore)
+
+Si aucun des deux n'est trouvé, l'app démarre quand même (comme avant
+avec DATABASE_URL absente) : les fonctionnalités liées à la base
+renvoient une erreur claire plutôt que de faire planter le serveur.
 """
 
 import os
-from typing import Generator, Optional
-from sqlmodel import SQLModel, Session, create_engine
-from sqlalchemy import inspect, text
+from typing import Optional
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+_CHEMINS_POSSIBLES = [
+    "/etc/secrets/firebase-service-account.json",  # Render Secret File
+    "firebase-service-account.json",  # local, à la racine du projet
+]
 
-# Render (et beaucoup d'hébergeurs) fournissent une URL commençant par
-# "postgres://", mais SQLAlchemy 2.x exige "postgresql://".
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+_client = None
+_tentative_initialisation_faite = False
 
-engine = create_engine(DATABASE_URL, echo=False) if DATABASE_URL else None
+
+def get_client():
+    """Renvoie le client Firestore, ou None si non configuré/erreur."""
+    global _client, _tentative_initialisation_faite
+
+    if _client is not None:
+        return _client
+    if _tentative_initialisation_faite:
+        return None  # déjà tenté et échoué, pas la peine de réessayer à chaque appel
+
+    _tentative_initialisation_faite = True
+
+    chemin_cle = next((c for c in _CHEMINS_POSSIBLES if os.path.exists(c)), None)
+    if not chemin_cle:
+        print("⚠️ Aucun fichier de clé Firebase trouvé — fonctionnalités DB désactivées")
+        return None
+
+    try:
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(chemin_cle)
+            firebase_admin.initialize_app(cred)
+        _client = firestore.client()
+        return _client
+    except Exception as e:
+        print(f"⚠️ Erreur d'initialisation Firestore (non bloquante) : {e}")
+        return None
 
 
 def base_de_donnees_configuree() -> bool:
-    return engine is not None
-
-
-def creer_tables() -> None:
-    if engine:
-        SQLModel.metadata.create_all(engine)
-
-
-def migrer_schema() -> None:
-    """
-    Migration légère et idempotente (pas d'Alembic ici, volontairement
-    simple) : ajoute les colonnes manquantes sur des tables qui
-    existaient DÉJÀ avant l'ajout d'un nouveau champ au modèle.
-
-    `create_all()` ne crée que les tables totalement absentes — il ne
-    modifie jamais une table déjà existante. Sans cette étape, une table
-    créée avant l'introduction d'un champ garde l'ancien schéma en base,
-    ce qui provoque une erreur SQL (colonne inexistante) à la moindre
-    requête qui y fait référence.
-    """
-    if not engine:
-        return
-
-    inspecteur = inspect(engine)
-    tables_existantes = inspecteur.get_table_names()
-
-    colonnes_a_verifier = {
-        "pronostic": [("telephone", "VARCHAR")],
-    }
-
-    with engine.connect() as connexion:
-        for nom_table, colonnes in colonnes_a_verifier.items():
-            if nom_table not in tables_existantes:
-                continue  # table entièrement nouvelle : create_all() s'en charge déjà
-
-            colonnes_presentes = {c["name"] for c in inspecteur.get_columns(nom_table)}
-            for nom_colonne, type_sql in colonnes:
-                if nom_colonne not in colonnes_presentes:
-                    connexion.execute(
-                        text(f"ALTER TABLE {nom_table} ADD COLUMN {nom_colonne} {type_sql}")
-                    )
-                    connexion.commit()
-
-
-def get_session() -> Generator[Optional[Session], None, None]:
-    if not engine:
-        yield None
-        return
-    with Session(engine) as session:
-        yield session
+    return get_client() is not None
