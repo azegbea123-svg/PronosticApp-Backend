@@ -47,6 +47,17 @@ TEAM_URL = "https://www.besoccer.com/team/{slug}"
 # courants dans les noms de clubs) — retirés pour générer des variantes.
 _TOKENS_A_RETIRER = {"fc", "cf", "afc", "cd", "sd", "ud", "rc", "ac", "ca", "de", "club"}
 
+# ⚠️ Certains clubs ont un slug BeSoccer qui ne suit AUCUNE règle de
+# slugification prévisible — BeSoccer est à l'origine une plateforme
+# espagnole, et garde parfois en interne le nom espagnol d'un club
+# international plutôt que son nom français/anglais usuel. Impossible à
+# deviner par une règle générique : table de correspondances connues,
+# à étoffer au fil des cas rencontrés (clé = mot-clé cherché dans le nom
+# saisi, en minuscule et sans accents).
+_SLUGS_CONNUS: dict = {
+    "marseille": "olympique-marsella",  # PAS "olympique-marseille" — vérifié
+}
+
 
 def _slugify(texte: str) -> str:
     """Convertit un nom d'équipe en slug d'URL (minuscule, sans accents, tirets)."""
@@ -58,9 +69,20 @@ def _slugify(texte: str) -> str:
 
 def _candidats_slug(nom_equipe: str) -> List[str]:
     """Génère plusieurs variantes de slug à essayer, de la plus probable à la moins probable."""
-    mots = nom_equipe.split()
-    candidats = [_slugify(nom_equipe)]
+    candidats: List[str] = []
 
+    # Les correspondances connues passent en premier — plus fiables
+    # qu'une règle générique puisque vérifiées manuellement.
+    nom_sans_accents = "".join(
+        c for c in unicodedata.normalize("NFKD", nom_equipe.lower()) if not unicodedata.combining(c)
+    )
+    for mot_cle, slug_connu in _SLUGS_CONNUS.items():
+        if mot_cle in nom_sans_accents and slug_connu not in candidats:
+            candidats.append(slug_connu)
+
+    candidats.append(_slugify(nom_equipe))
+
+    mots = nom_equipe.split()
     mots_filtres = [m for m in mots if m.lower() not in _TOKENS_A_RETIRER]
     if mots_filtres and len(mots_filtres) != len(mots):
         candidat_filtre = _slugify(" ".join(mots_filtres))

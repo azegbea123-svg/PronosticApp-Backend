@@ -5,8 +5,9 @@ import string
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 from pydantic import BaseModel
 
 from .models import MatchAnalysisRequest, MatchAnalysisResponse
@@ -68,6 +69,39 @@ async def debug_elo(equipe1: str, equipe2: str):
         return {"equipe1": equipe1, "equipe2": equipe2, "resultat": resultat}
     except Exception as e:
         return {"equipe1": equipe1, "equipe2": equipe2, "erreur": f"{type(e).__name__}: {e}"}
+
+
+@app.post("/debug/verifier-clubs")
+async def debug_verifier_clubs(noms: List[str]):
+    """
+    🔧 Vérifie en masse une liste de noms de clubs contre BeSoccer,
+    directement depuis ce serveur (qui a un vrai accès réseau à
+    besoccer.com, contrairement à l'environnement de développement).
+    Renvoie uniquement ceux qui échouent — pas la peine de committer
+    les corrections pour ceux qui marchent déjà.
+    """
+    resultats_echecs = []
+
+    async def _verifier_un(nom: str):
+        try:
+            stats = await besoccer.get_team_stats(nom)
+            if not stats:
+                resultats_echecs.append({"nom": nom, "raison": "aucune donnée trouvée"})
+        except Exception as e:
+            resultats_echecs.append({"nom": nom, "raison": f"{type(e).__name__}: {e}"})
+
+    # Par lots de 8 en parallèle — assez rapide sans bombarder BeSoccer
+    # de centaines de requêtes simultanées (risque de blocage).
+    taille_lot = 8
+    for i in range(0, len(noms), taille_lot):
+        lot = noms[i : i + taille_lot]
+        await asyncio.gather(*[_verifier_un(nom) for nom in lot])
+
+    return {
+        "total_verifies": len(noms),
+        "total_echecs": len(resultats_echecs),
+        "echecs": resultats_echecs,
+    }
 
 
 @app.get("/debug/besoccer")
@@ -320,14 +354,35 @@ async def vip_payer(requete: PaiementRequest, uid: str = Depends(auth.utilisateu
     # l'utilisateur au besoin — ça ne devient jamais son identifiant.
     repo.creer_ou_maj_profil(uid, telephone=telephone)
 
+    # Nécessaire pour que le webhook (callback PayGate) sache à quel
+    # compte attribuer le VIP une fois la confirmation reçue.
+    try:
+        repo.enregistrer_paiement_initie(reference, uid, PRIX_VIP_FCFA)
+    except Exception:
+        pass  # le paiement fonctionne quand même via le sondage classique en repli
+
     return {"txReference": reference, "montant": PRIX_VIP_FCFA, "dureeJours": DUREE_VIP_JOURS}
 
 
 @app.post("/vip/confirmer")
 async def vip_confirmer(requete: ConfirmationRequest, uid: str = Depends(auth.utilisateur_courant)):
-    """À appeler après /vip/payer pour vérifier et activer le VIP si payé."""
+    """
+    À appeler après /vip/payer pour vérifier et activer le VIP si payé.
+    Vérifie d'abord si le webhook PayGate a déjà traité ce paiement
+    (rapide, aucun appel réseau supplémentaire) avant de retomber sur une
+    vérification active auprès de PayGate en repli.
+    """
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
+
+    paiement = repo.obtenir_paiement(requete.txReference)
+    if paiement and paiement.get("traite"):
+        utilisateur = repo.obtenir_utilisateur(uid)
+        vip_expire = utilisateur.get("vip_expire_le") if utilisateur else None
+        return {
+            "confirme": True,
+            "vipExpireLe": vip_expire.isoformat() if vip_expire else None,
+        }
 
     confirme = await paygate.verifier_paiement(requete.txReference)
     if not confirme:
@@ -343,8 +398,63 @@ async def vip_confirmer(requete: ConfirmationRequest, uid: str = Depends(auth.ut
     )
     nouvelle_expiration = base + timedelta(days=DUREE_VIP_JOURS)
     repo.definir_expiration_vip(uid, nouvelle_expiration)
+    if paiement:
+        repo.marquer_paiement_traite(requete.txReference)
 
     return {"confirme": True, "vipExpireLe": nouvelle_expiration.isoformat()}
+
+
+# ⚠️ Callback PARTAGÉ avec LotoPredict — un seul compte PayGate Global,
+# une seule URL de callback possible. On distingue les deux applis par le
+# montant (300 FCFA = LotoPredict, 500 FCFA = PronosticApp) : c'est
+# fragile si les deux applis utilisent un jour le même montant, mais
+# c'est le compromis choisi en attendant un compte PayGate séparé.
+LOTOPREDICT_CALLBACK_URL = "https://paygate-api.onrender.com/callback"
+
+
+@app.post("/webhooks/paygate")
+async def webhook_paygate(requete: Request):
+    try:
+        payload = await requete.json()
+    except Exception:
+        return {"erreur": "corps de requête invalide"}
+
+    try:
+        montant_recu = float(payload.get("amount"))
+    except (TypeError, ValueError):
+        montant_recu = None
+
+    if montant_recu != PRIX_VIP_FCFA:
+        # Pas pour PronosticApp — on relaie tel quel vers LotoPredict,
+        # qui ne voit aucune différence par rapport à avant.
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(LOTOPREDICT_CALLBACK_URL, json=payload, timeout=10.0)
+        except Exception:
+            pass
+        return {"relaye": True}
+
+    tx_reference = payload.get("tx_reference")
+    if not tx_reference or not db.get_client():
+        return {"traite": False}
+
+    paiement = repo.obtenir_paiement(tx_reference)
+    if not paiement or paiement.get("traite"):
+        return {"traite": False}
+
+    uid = paiement["uid"]
+    maintenant = datetime.now(timezone.utc)
+    utilisateur = repo.obtenir_utilisateur(uid)
+    base = (
+        utilisateur["vip_expire_le"]
+        if (utilisateur and utilisateur.get("vip_expire_le") and utilisateur["vip_expire_le"] > maintenant)
+        else maintenant
+    )
+    nouvelle_expiration = base + timedelta(days=DUREE_VIP_JOURS)
+    repo.definir_expiration_vip(uid, nouvelle_expiration)
+    repo.marquer_paiement_traite(tx_reference)
+
+    return {"traite": True}
 
 
 @app.get("/historique")

@@ -21,6 +21,7 @@ from . import db
 COLLECTION_PRONOSTICS = "pronostics"
 COLLECTION_UTILISATEURS = "utilisateurs"
 COLLECTION_CODES_VIP = "codes_vip"
+COLLECTION_PAIEMENTS = "paiements_en_attente"
 
 
 def _maintenant():
@@ -271,3 +272,34 @@ def marquer_code_utilise(code: str, uid: str) -> None:
     client.collection(COLLECTION_CODES_VIP).document(code).update(
         {"utilise": True, "uid_utilisateur": uid, "utilise_le": _maintenant()}
     )
+
+
+# ==== Paiements en attente (pour le callback PayGate partagé avec LotoPredict) ====
+
+def enregistrer_paiement_initie(tx_reference: str, uid: str, montant: int) -> None:
+    client = db.get_client()
+    if not client:
+        return
+    client.collection(COLLECTION_PAIEMENTS).document(tx_reference).set(
+        {
+            "uid": uid,
+            "montant": montant,
+            "traite": False,
+            "cree_le": _maintenant(),
+        }
+    )
+
+
+def obtenir_paiement(tx_reference: str) -> Optional[Dict[str, Any]]:
+    client = db.get_client()
+    if not client:
+        return None
+    doc = client.collection(COLLECTION_PAIEMENTS).document(tx_reference).get()
+    return doc.to_dict() if doc.exists else None
+
+
+def marquer_paiement_traite(tx_reference: str) -> None:
+    client = db.get_client()
+    if not client:
+        return
+    client.collection(COLLECTION_PAIEMENTS).document(tx_reference).update({"traite": True})
