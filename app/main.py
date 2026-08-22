@@ -1,5 +1,4 @@
 import asyncio
-import os
 import random
 import string
 from datetime import datetime, timedelta, timezone
@@ -17,16 +16,7 @@ from . import db
 from . import repo
 from . import paygate
 from . import auth
-
-# 💎 Config VIP — modifiable directement ici.
-PRIX_VIP_FCFA = 500
-DUREE_VIP_JOURS = 3
-LIMITE_GRATUITE_QUOTIDIENNE = 3
-
-# ⚠️ Mot de passe admin simple (pas un vrai système d'auth). À définir en
-# variable d'environnement sur Render plutôt que de garder la valeur par
-# défaut ci-dessous en production.
-MOT_DE_PASSE_ADMIN = os.environ.get("ADMIN_PASSWORD", "change-moi")
+from .config import PRIX_VIP_FCFA, DUREE_VIP_JOURS, LIMITE_GRATUITE_QUOTIDIENNE
 
 app = FastAPI(title="PronosticApp API")
 
@@ -46,8 +36,9 @@ async def health():
 
 
 @app.get("/debug/db")
-def debug_db():
-    """🔧 Diagnostic : état réel de la connexion Firestore."""
+def debug_db(uid: str = Depends(auth.utilisateur_courant)):
+    """🔧 Diagnostic (admin) : état réel de la connexion Firestore."""
+    auth.exiger_admin(uid)
     client = db.get_client()
     resultat: Dict[str, Any] = {"firestore_configure": client is not None}
     if client:
@@ -62,8 +53,9 @@ def debug_db():
 
 
 @app.get("/debug/elo")
-async def debug_elo(equipe1: str, equipe2: str):
-    """🔧 Diagnostic temporaire pour la recherche d'ELO/confrontation directe."""
+async def debug_elo(equipe1: str, equipe2: str, uid: str = Depends(auth.utilisateur_courant)):
+    """🔧 Diagnostic (admin) pour la recherche d'ELO/confrontation directe."""
+    auth.exiger_admin(uid)
     try:
         resultat = await besoccer.get_elo_confrontation(equipe1, equipe2)
         return {"equipe1": equipe1, "equipe2": equipe2, "resultat": resultat}
@@ -72,9 +64,9 @@ async def debug_elo(equipe1: str, equipe2: str):
 
 
 @app.post("/debug/verifier-clubs")
-async def debug_verifier_clubs(noms: List[str]):
+async def debug_verifier_clubs(noms: List[str], uid: str = Depends(auth.utilisateur_courant)):
     """
-    🔧 Vérifie en masse une liste de noms de clubs contre BeSoccer.
+    🔧 Vérifie en masse une liste de noms de clubs contre BeSoccer (admin).
 
     ⚠️ Volontairement LENT (petits lots + pause entre chaque) — un test
     en rafale de 150 clubs a déjà déclenché un blocage temporaire côté
@@ -82,6 +74,7 @@ async def debug_verifier_clubs(noms: List[str]):
     fiable, avait échoué). Mieux vaut quelques minutes de plus qu'une
     liste d'échecs polluée de faux positifs.
     """
+    auth.exiger_admin(uid)
     resultats_echecs = []
 
     async def _verifier_un(nom: str):
@@ -107,8 +100,9 @@ async def debug_verifier_clubs(noms: List[str]):
 
 
 @app.get("/debug/besoccer")
-async def debug_besoccer(equipe: str):
-    """🔧 Diagnostic temporaire, adapté à la version basée sur les slugs d'équipe."""
+async def debug_besoccer(equipe: str, uid: str = Depends(auth.utilisateur_courant)):
+    """🔧 Diagnostic (admin), adapté à la version basée sur les slugs d'équipe."""
+    auth.exiger_admin(uid)
     import httpx
     from .sources.besoccer import _candidats_slug, TEAM_URL, HEADERS, _extraire_forme_recente
 
@@ -137,8 +131,9 @@ async def debug_besoccer(equipe: str):
 
 
 @app.get("/debug/sofascore")
-async def debug_sofascore(equipe: str):
-    """🔧 Diagnostic : Sofascore reste bloqué (403) depuis l'IP de Render, gardé pour vérifier si ça change un jour."""
+async def debug_sofascore(equipe: str, uid: str = Depends(auth.utilisateur_courant)):
+    """🔧 Diagnostic (admin) : Sofascore reste bloqué (403) depuis l'IP de Render, gardé pour vérifier si ça change un jour."""
+    auth.exiger_admin(uid)
     import httpx
     from .sources.sofascore import BASE, HEADERS
 
@@ -468,12 +463,15 @@ def lister_historique(limite: int = 20, uid: str = Depends(auth.utilisateur_cour
 
 
 @app.patch("/historique/{pronostic_id}")
-def enregistrer_resultat_reel(pronostic_id: str, resultat_reel: str):
+def enregistrer_resultat_reel(
+    pronostic_id: str, resultat_reel: str, uid: str = Depends(auth.utilisateur_courant)
+):
     """
     Renseigne le résultat réel d'un match une fois connu (activation
-    manuelle en complément de la vérification automatique).
-    resultat_reel doit valoir "V1", "NUL" ou "V2".
+    manuelle en complément de la vérification automatique). Réservé à
+    l'admin — resultat_reel doit valoir "V1", "NUL" ou "V2".
     """
+    auth.exiger_admin(uid)
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
     if resultat_reel not in ("V1", "NUL", "V2"):
@@ -491,7 +489,9 @@ def enregistrer_resultat_reel(pronostic_id: str, resultat_reel: str):
 
 
 @app.get("/historique/stats")
-def stats_fiabilite():
+def stats_fiabilite(uid: str = Depends(auth.utilisateur_courant)):
+    """Statistiques globales de fiabilité, tous utilisateurs confondus — réservé à l'admin."""
+    auth.exiger_admin(uid)
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
@@ -525,11 +525,14 @@ async def _verifier_un_pronostic(p: Dict[str, Any]) -> bool:
 
 
 @app.post("/taches/verifier-resultats")
-async def tache_verifier_resultats(limite: int = 20):
+async def tache_verifier_resultats(limite: int = 20, uid: str = Depends(auth.utilisateur_courant)):
     """
     Vérification AUTOMATIQUE des pronostics en attente — à appeler
-    périodiquement par un déclencheur externe (ex: cron-job.org).
+    périodiquement par un déclencheur externe (ex: cron-job.org), avec
+    l'en-tête "Authorization: Bearer TON_MOT_DE_PASSE_ADMIN" configuré
+    dans les headers personnalisés du cron job.
     """
+    auth.exiger_admin(uid)
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
 
@@ -553,7 +556,6 @@ async def tache_verifier_resultats(limite: int = 20):
 
 class GenererCodeRequest(BaseModel):
     duree_jours: int
-    mot_de_passe_admin: str
 
 
 class ActiverCodeRequest(BaseModel):
@@ -566,10 +568,9 @@ def _generer_code_aleatoire(longueur: int = 8) -> str:
 
 
 @app.post("/admin/codes-vip")
-def admin_generer_code(requete: GenererCodeRequest):
+def admin_generer_code(requete: GenererCodeRequest, uid: str = Depends(auth.utilisateur_courant)):
     """Génère un code VIP activable manuellement — porte dérobée admin."""
-    if requete.mot_de_passe_admin != MOT_DE_PASSE_ADMIN:
-        raise HTTPException(403, "Mot de passe admin incorrect")
+    auth.exiger_admin(uid)
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
     if requete.duree_jours <= 0:
@@ -587,9 +588,8 @@ def admin_generer_code(requete: GenererCodeRequest):
 
 
 @app.get("/admin/codes-vip")
-def admin_lister_codes(mot_de_passe_admin: str):
-    if mot_de_passe_admin != MOT_DE_PASSE_ADMIN:
-        raise HTTPException(403, "Mot de passe admin incorrect")
+def admin_lister_codes(uid: str = Depends(auth.utilisateur_courant)):
+    auth.exiger_admin(uid)
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
     return repo.lister_codes_vip()
@@ -652,20 +652,16 @@ class DebugAnalyseRequest(BaseModel):
     equipe1: str
     equipe2: str
     typeMatch: str
-    mot_de_passe_admin: str
 
 
 @app.post("/debug/analyser-match")
-async def debug_analyser_match(requete: DebugAnalyseRequest):
+async def debug_analyser_match(requete: DebugAnalyseRequest, uid: str = Depends(auth.utilisateur_courant)):
     """
     🔧 Fait tourner EXACTEMENT le même moteur de pronostic que
     /match/analyse (mêmes sources, même modèle Poisson, même recherche
-    ELO), mais protégé par le mot de passe admin au lieu d'un compte
-    utilisateur — pour débugger sans avoir besoin d'un jeton Firebase.
-    Aucun quota, aucun enregistrement en base.
+    ELO), réservé à l'admin. Aucun quota, aucun enregistrement en base.
     """
-    if requete.mot_de_passe_admin != MOT_DE_PASSE_ADMIN:
-        raise HTTPException(403, "Mot de passe admin incorrect")
+    auth.exiger_admin(uid)
 
     stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
         _stats_toutes_sources(requete.equipe1),

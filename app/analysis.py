@@ -70,12 +70,27 @@ def _force_attaque_defense(stats: Optional[Dict[str, Any]]) -> Tuple[float, floa
     Renvoie (force d'attaque, faiblesse défensive), normalisées à 1.0 =
     dans la moyenne. Sans donnée : (1.0, 1.0), hypothèse neutre plutôt
     qu'un biais arbitraire dans un sens ou l'autre.
+
+    ⚠️ Lissage statistique appliqué (shrinkage) : sur un petit échantillon
+    (3-5 matchs), un taux brut peut être extrême par pur hasard — ex: une
+    équipe qui n'a encaissé qu'1 but en 4 matchs (contre des adversaires
+    faibles, ou juste par chance) ressort comme "défensivement excellente"
+    alors que ce n'est pas forcément représentatif. On mélange le taux
+    observé avec la moyenne générale, pondéré par la taille réelle de
+    l'échantillon — plus il y a de matchs, plus on fait confiance au taux
+    observé ; sur peu de matchs, on reste proche de la moyenne par
+    prudence. Correction directement motivée par un cas réel remonté
+    (Arsenal donné perdant face à Coventry City à cause d'un échantillon
+    trop petit et non représentatif).
     """
     if not stats or stats["matchs_analyses"] == 0:
         return 1.0, 1.0
 
-    taux_marques = stats["buts_marques"] / stats["matchs_analyses"]
-    taux_encaisses = stats["buts_encaisses"] / stats["matchs_analyses"]
+    matchs = stats["matchs_analyses"]
+    POIDS_LISSAGE = 5  # équivaut à "ajouter" 5 matchs fictifs à la moyenne
+
+    taux_marques = (stats["buts_marques"] + POIDS_LISSAGE * MOYENNE_BUTS_LIGUE) / (matchs + POIDS_LISSAGE)
+    taux_encaisses = (stats["buts_encaisses"] + POIDS_LISSAGE * MOYENNE_BUTS_LIGUE) / (matchs + POIDS_LISSAGE)
 
     force_attaque = taux_marques / MOYENNE_BUTS_LIGUE
     faiblesse_defense = taux_encaisses / MOYENNE_BUTS_LIGUE
@@ -165,7 +180,14 @@ def _facteur_elo(elo_equipe1: Optional[float], elo_equipe2: Optional[float]) -> 
     """
     Convertit un écart d'ELO en multiplicateurs à appliquer aux buts
     attendus de chaque équipe, via la formule logistique standard des
-    systèmes ELO (la même famille de formule que les échecs).
+    systèmes ELO (la même famille de formule que les échecs) —
+    RECALIBRÉE pour l'échelle réelle observée sur BeSoccer (des valeurs
+    du type 73-96, donc une échelle bien plus resserrée que le 1000-2500
+    des échecs). Avec le diviseur d'origine (400, calibré échecs), un
+    écart de 13 points (ex: Arsenal 96 vs Coventry City 83, pourtant un
+    vrai gouffre de niveau) ne produisait quasiment aucun effet — bug
+    identifié et corrigé après un vrai cas remonté (Arsenal donné quasi
+    à égalité face à un club de division inférieure).
 
     Sans ELO disponible pour les deux équipes : (1.0, 1.0), neutre —
     n'affecte pas le calcul basé sur les buts récents.
@@ -173,8 +195,10 @@ def _facteur_elo(elo_equipe1: Optional[float], elo_equipe2: Optional[float]) -> 
     if elo_equipe1 is None or elo_equipe2 is None:
         return 1.0, 1.0
 
-    force1 = 10 ** (elo_equipe1 / 400)
-    force2 = 10 ** (elo_equipe2 / 400)
+    DIVISEUR_ECHELLE_BESOCCER = 30  # ~73/27 pour un écart de 13 points, ~81/19 pour 19 points
+
+    force1 = 10 ** (elo_equipe1 / DIVISEUR_ECHELLE_BESOCCER)
+    force2 = 10 ** (elo_equipe2 / DIVISEUR_ECHELLE_BESOCCER)
     part1 = force1 / (force1 + force2)  # entre 0 et 1
 
     # part1 = 0.5 (équipes égales) -> multiplicateur neutre (1.0, 1.0)

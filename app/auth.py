@@ -1,21 +1,36 @@
 """
-Authentification — vérifie les jetons Firebase envoyés par l'appli
-Android (email/mot de passe ou connexion Google, peu importe : Firebase
-Auth produit le même type de jeton dans les deux cas).
+Authentification — UN SEUL mécanisme pour tout le backend, via l'en-tête
+standard "Authorization: Bearer <jeton>".
 
-L'identité de l'utilisateur est désormais son `uid` Firebase, plus
-jamais son numéro de téléphone — le téléphone devient une simple info
-de contact optionnelle, collectée au moment du paiement VIP.
+Deux types de jetons acceptés, résolus de façon transparente :
+  1. Un vrai jeton Firebase (ce qu'envoie l'appli Android normalement)
+     -> renvoie l'uid du compte réel.
+  2. Le mot de passe admin lui-même, utilisé comme "jeton universel" de
+     debug -> renvoie un uid spécial "admin_debug", qui a accès à tout
+     (y compris les actions réservées à l'admin, voir _exiger_admin).
+
+Avantage concret : Swagger (/docs) affiche un vrai bouton "Authorize" en
+haut de page grâce à HTTPBearer — on colle le jeton UNE FOIS, et il
+s'applique automatiquement à tous les endpoints protégés ensuite, sans
+avoir à le retaper à chaque requête ni à jongler entre plusieurs
+mécanismes différents selon l'endpoint.
 """
 
-from typing import Optional
-from fastapi import Header, HTTPException
+from fastapi import HTTPException, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from firebase_admin import auth as firebase_auth
 
 from . import db
+from .config import MOT_DE_PASSE_ADMIN
+
+_schema_securite = HTTPBearer(
+    description="Colle ici soit ton mot de passe admin (mode debug), soit un vrai jeton Firebase (appli)."
+)
+
+UID_ADMIN_DEBUG = "admin_debug"
 
 
-def _decoder_token(id_token: str) -> Optional[dict]:
+def _decoder_token_firebase(id_token: str):
     if not db.get_client():  # l'app Firebase Admin n'est initialisée que si la clé est configurée
         return None
     try:
@@ -24,23 +39,22 @@ def _decoder_token(id_token: str) -> Optional[dict]:
         return None
 
 
-async def utilisateur_courant(authorization: Optional[str] = Header(None)) -> str:
+async def utilisateur_courant(
+    identifiants: HTTPAuthorizationCredentials = Security(_schema_securite),
+) -> str:
     """
-    Dépendance FastAPI : vérifie le jeton envoyé dans l'en-tête
-    'Authorization: Bearer <jeton>' et renvoie l'uid de l'utilisateur.
-    Lève une 401 si l'en-tête est absent ou le jeton invalide/expiré.
-
-    Enregistre aussi l'email sur le profil au passage (idempotent —
-    ça garde le profil Firestore synchronisé avec Firebase Auth sans
-    action supplémentaire nécessaire côté appli).
+    Dépendance FastAPI utilisée par TOUS les endpoints protégés.
+    Renvoie soit l'uid réel (jeton Firebase valide), soit "admin_debug"
+    (mot de passe admin utilisé comme jeton). Lève une 401 sinon.
     """
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Authentification requise (connecte-toi d'abord)")
+    jeton = identifiants.credentials.strip()
 
-    token = authorization.removeprefix("Bearer ").strip()
-    decoded = _decoder_token(token)
+    if jeton == MOT_DE_PASSE_ADMIN:
+        return UID_ADMIN_DEBUG
+
+    decoded = _decoder_token_firebase(jeton)
     if not decoded:
-        raise HTTPException(401, "Session invalide ou expirée, reconnecte-toi")
+        raise HTTPException(401, "Jeton invalide — colle soit ton mot de passe admin, soit un vrai jeton Firebase")
 
     uid = decoded["uid"]
     email = decoded.get("email")
@@ -53,6 +67,12 @@ async def utilisateur_courant(authorization: Optional[str] = Header(None)) -> st
             pass  # ne doit jamais faire échouer l'authentification elle-même
 
     return uid
+
+
+def exiger_admin(uid: str) -> None:
+    """À appeler dans les endpoints réservés à l'admin (génération de codes VIP, etc.)."""
+    if uid != UID_ADMIN_DEBUG:
+        raise HTTPException(403, "Réservé à l'administrateur (connecte-toi avec le mot de passe admin)")
 
 
 def supprimer_compte_firebase(uid: str) -> None:
