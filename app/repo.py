@@ -44,6 +44,13 @@ def enregistrer_pronostic(
     probabilite_v2: float,
     telephone: Optional[str] = None,
 ) -> Optional[str]:
+    """
+    Enregistre un pronostic — sert UNIQUEMENT au suivi du quota gratuit
+    quotidien désormais (voir pronostics_utilises_aujourdhui). Le moteur
+    peut aller chercher un résultat réel directement sur BeSoccer à la
+    demande si besoin, donc plus la peine de stocker/vérifier nous-mêmes
+    des résultats en base — ce système a été retiré pour rester simple.
+    """
     client = db.get_client()
     if not client:
         return None
@@ -59,9 +66,6 @@ def enregistrer_pronostic(
             "probabilite_v1": probabilite_v1,
             "probabilite_nul": probabilite_nul,
             "probabilite_v2": probabilite_v2,
-            "resultat_reel": None,
-            "verifie": False,
-            "correct": None,
             "cree_le": _maintenant(),
         }
     )
@@ -92,115 +96,6 @@ def pronostics_utilises_aujourdhui(uid: str) -> int:
         # sans configuration Firestore supplémentaire)
         docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
         return sum(1 for d in docs if (d.get("cree_le") or debut_jour) >= debut_jour)
-
-
-def lister_historique_utilisateur(uid: str, limite: int = 20) -> List[Dict[str, Any]]:
-    """
-    Historique PERSONNEL d'un utilisateur. Essaie d'abord un tri
-    directement côté Firestore (rapide, ne récupère que ce qui est
-    nécessaire) ; si l'index composite correspondant n'existe pas encore,
-    retombe sur l'ancienne méthode (tout récupérer puis trier en Python).
-    """
-    client = db.get_client()
-    if not client:
-        return []
-
-    try:
-        query = (
-            client.collection(COLLECTION_PRONOSTICS)
-            .where("uid", "==", uid)
-            .order_by("cree_le", direction="DESCENDING")
-            .limit(limite)
-        )
-        resultats = []
-        for doc in query.stream():
-            d = doc.to_dict()
-            d["id"] = doc.id
-            resultats.append(d)
-        return resultats
-    except Exception:
-        pass
-
-    docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
-    resultats = []
-    for doc in docs:
-        d = doc.to_dict()
-        d["id"] = doc.id
-        resultats.append(d)
-
-    resultats.sort(key=lambda d: d.get("cree_le") or _maintenant(), reverse=True)
-    return resultats[:limite]
-
-
-def lister_historique(limite: int = 20) -> List[Dict[str, Any]]:
-    client = db.get_client()
-    if not client:
-        return []
-
-    query = (
-        client.collection(COLLECTION_PRONOSTICS)
-        .order_by("cree_le", direction="DESCENDING")
-        .limit(limite)
-    )
-    resultats = []
-    for doc in query.stream():
-        d = doc.to_dict()
-        d["id"] = doc.id
-        resultats.append(d)
-    return resultats
-
-
-def obtenir_pronostic(pronostic_id: str) -> Optional[Dict[str, Any]]:
-    client = db.get_client()
-    if not client:
-        return None
-    doc = client.collection(COLLECTION_PRONOSTICS).document(pronostic_id).get()
-    if not doc.exists:
-        return None
-    d = doc.to_dict()
-    d["id"] = doc.id
-    return d
-
-
-def marquer_pronostic_verifie(pronostic_id: str, resultat_reel: str, correct: bool) -> None:
-    client = db.get_client()
-    if not client:
-        return
-    client.collection(COLLECTION_PRONOSTICS).document(pronostic_id).update(
-        {"resultat_reel": resultat_reel, "verifie": True, "correct": correct}
-    )
-
-
-def lister_pronostics_non_verifies(limite: int = 20) -> List[Dict[str, Any]]:
-    client = db.get_client()
-    if not client:
-        return []
-    query = (
-        client.collection(COLLECTION_PRONOSTICS)
-        .where("verifie", "==", False)
-        .limit(limite)
-    )
-    resultats = []
-    for doc in query.stream():
-        d = doc.to_dict()
-        d["id"] = doc.id
-        resultats.append(d)
-    return resultats
-
-
-def stats_fiabilite() -> Dict[str, Any]:
-    client = db.get_client()
-    if not client:
-        return {"total": 0, "corrects": 0}
-
-    docs = client.collection(COLLECTION_PRONOSTICS).where("verifie", "==", True).stream()
-    total = 0
-    corrects = 0
-    for doc in docs:
-        total += 1
-        if doc.to_dict().get("correct"):
-            corrects += 1
-    return {"total": total, "corrects": corrects}
 
 
 # ==== Utilisateurs (compte + statut VIP) ====

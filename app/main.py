@@ -18,7 +18,19 @@ from . import paygate
 from . import auth
 from .config import PRIX_VIP_FCFA, DUREE_VIP_JOURS, LIMITE_GRATUITE_QUOTIDIENNE
 
-app = FastAPI(title="PronosticApp API")
+app = FastAPI(
+    title="PronosticApp API",
+    openapi_tags=[
+        {"name": "Système", "description": "Santé du service et callback paiement (aucune authentification)."},
+        {"name": "📖 Compte — Infos", "description": "Consulter son propre profil (lecture seule)."},
+        {"name": "📖 VIP — Infos", "description": "Consulter son propre statut VIP (lecture seule)."},
+        {"name": "📖 Admin — Diagnostic", "description": "Outils de lecture/debug BeSoccer, Firestore, codes VIP (réservé admin)."},
+        {"name": "✏️ Pronostic — Actions", "description": "Analyser un match — le cœur de l'appli."},
+        {"name": "✏️ Compte — Actions", "description": "Modifier ou supprimer son propre compte."},
+        {"name": "✏️ VIP — Actions", "description": "Payer, confirmer ou activer le VIP."},
+        {"name": "✏️ Admin — Actions", "description": "Générer des codes VIP, tester le moteur de pronostic (réservé admin)."},
+    ],
+)
 
 # CORS ouvert : simple pour un backend consommé uniquement par l'appli Android.
 app.add_middleware(
@@ -29,13 +41,13 @@ app.add_middleware(
 )
 
 
-@app.get("/")
+@app.get("/", tags=["Système"])
 async def health():
     """Endpoint de santé, utile pour vérifier que le déploiement fonctionne."""
     return {"status": "ok", "service": "PronosticApp API"}
 
 
-@app.get("/debug/db")
+@app.get("/debug/db", tags=["📖 Admin — Diagnostic"])
 def debug_db(uid: str = Depends(auth.utilisateur_courant)):
     """🔧 Diagnostic (admin) : état réel de la connexion Firestore."""
     auth.exiger_admin(uid)
@@ -43,16 +55,15 @@ def debug_db(uid: str = Depends(auth.utilisateur_courant)):
     resultat: Dict[str, Any] = {"firestore_configure": client is not None}
     if client:
         try:
-            historique = repo.lister_historique(limite=1)
+            list(client.collection(repo.COLLECTION_UTILISATEURS).limit(1).stream())
             resultat["connexion_ok"] = True
-            resultat["exemple_lecture_ok"] = True
         except Exception as e:
             resultat["connexion_ok"] = False
             resultat["erreur"] = f"{type(e).__name__}: {e}"
     return resultat
 
 
-@app.get("/debug/elo")
+@app.get("/debug/elo", tags=["📖 Admin — Diagnostic"])
 async def debug_elo(equipe1: str, equipe2: str, uid: str = Depends(auth.utilisateur_courant)):
     """🔧 Diagnostic (admin) pour la recherche d'ELO/confrontation directe."""
     auth.exiger_admin(uid)
@@ -63,7 +74,7 @@ async def debug_elo(equipe1: str, equipe2: str, uid: str = Depends(auth.utilisat
         return {"equipe1": equipe1, "equipe2": equipe2, "erreur": f"{type(e).__name__}: {e}"}
 
 
-@app.post("/debug/verifier-clubs")
+@app.post("/debug/verifier-clubs", tags=["✏️ Admin — Actions"])
 async def debug_verifier_clubs(noms: List[str], uid: str = Depends(auth.utilisateur_courant)):
     """
     🔧 Vérifie en masse une liste de noms de clubs contre BeSoccer (admin).
@@ -99,7 +110,7 @@ async def debug_verifier_clubs(noms: List[str], uid: str = Depends(auth.utilisat
     }
 
 
-@app.get("/debug/besoccer")
+@app.get("/debug/besoccer", tags=["📖 Admin — Diagnostic"])
 async def debug_besoccer(equipe: str, uid: str = Depends(auth.utilisateur_courant)):
     """🔧 Diagnostic (admin), adapté à la version basée sur les slugs d'équipe."""
     auth.exiger_admin(uid)
@@ -130,7 +141,7 @@ async def debug_besoccer(equipe: str, uid: str = Depends(auth.utilisateur_couran
     return resultat
 
 
-@app.get("/debug/sofascore")
+@app.get("/debug/sofascore", tags=["📖 Admin — Diagnostic"])
 async def debug_sofascore(equipe: str, uid: str = Depends(auth.utilisateur_courant)):
     """🔧 Diagnostic (admin) : Sofascore reste bloqué (403) depuis l'IP de Render, gardé pour vérifier si ça change un jour."""
     auth.exiger_admin(uid)
@@ -190,15 +201,7 @@ def _normaliser_telephone(telephone: str) -> str:
     return telephone.replace(" ", "").replace("+", "").strip()
 
 
-def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
-    if p_v1 >= p_nul and p_v1 >= p_v2:
-        return "V1"
-    if p_v2 >= p_nul and p_v2 >= p_v1:
-        return "V2"
-    return "NUL"
-
-
-@app.post("/match/analyse", response_model=MatchAnalysisResponse)
+@app.post("/match/analyse", response_model=MatchAnalysisResponse, tags=["✏️ Pronostic — Actions"])
 async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.utilisateur_courant)):
     est_vip = False
     pronostics_restants: Optional[int] = None
@@ -265,7 +268,7 @@ class ConfirmationRequest(BaseModel):
     txReference: str
 
 
-@app.get("/profil")
+@app.get("/profil", tags=["📖 Compte — Infos"])
 def obtenir_profil(uid: str = Depends(auth.utilisateur_courant)):
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
@@ -284,7 +287,7 @@ def obtenir_profil(uid: str = Depends(auth.utilisateur_courant)):
     }
 
 
-@app.post("/profil")
+@app.post("/profil", tags=["✏️ Compte — Actions"])
 def maj_profil(requete: ProfilRequest, uid: str = Depends(auth.utilisateur_courant)):
     """
     Renseigne/actualise le numéro de téléphone du compte — une simple
@@ -309,7 +312,7 @@ def _formater_date_fr(dt: datetime) -> str:
     return f"{dt.day} {_MOIS_FR[dt.month - 1]} {dt.year} à {dt.hour:02d}:{dt.minute:02d}"
 
 
-@app.get("/vip/statut")
+@app.get("/vip/statut", tags=["📖 VIP — Infos"])
 def vip_statut(uid: str = Depends(auth.utilisateur_courant)):
     if not db.get_client():
         raise HTTPException(503, "Base de données non configurée sur ce déploiement")
@@ -336,7 +339,7 @@ def vip_statut(uid: str = Depends(auth.utilisateur_courant)):
     }
 
 
-@app.post("/vip/payer")
+@app.post("/vip/payer", tags=["✏️ VIP — Actions"])
 async def vip_payer(requete: PaiementRequest, uid: str = Depends(auth.utilisateur_courant)):
     """Lance un paiement Mobile Money via l'API officielle PayGate Global."""
     if requete.reseau not in ("TMONEY", "FLOOZ"):
@@ -361,7 +364,7 @@ async def vip_payer(requete: PaiementRequest, uid: str = Depends(auth.utilisateu
     return {"txReference": reference, "montant": PRIX_VIP_FCFA, "dureeJours": DUREE_VIP_JOURS}
 
 
-@app.post("/vip/confirmer")
+@app.post("/vip/confirmer", tags=["✏️ VIP — Actions"])
 async def vip_confirmer(requete: ConfirmationRequest, uid: str = Depends(auth.utilisateur_courant)):
     """
     À appeler après /vip/payer pour vérifier et activer le VIP si payé.
@@ -409,7 +412,7 @@ async def vip_confirmer(requete: ConfirmationRequest, uid: str = Depends(auth.ut
 LOTOPREDICT_CALLBACK_URL = "https://paygate-api.onrender.com/callback"
 
 
-@app.post("/webhooks/paygate")
+@app.post("/webhooks/paygate", tags=["Système"])
 async def webhook_paygate(requete: Request):
     try:
         payload = await requete.json()
@@ -454,102 +457,6 @@ async def webhook_paygate(requete: Request):
     return {"traite": True}
 
 
-@app.get("/historique")
-def lister_historique(limite: int = 20, uid: str = Depends(auth.utilisateur_courant)):
-    """Historique PERSONNEL de l'utilisateur connecté (plus une vue globale)."""
-    if not db.get_client():
-        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
-    return repo.lister_historique_utilisateur(uid, limite)
-
-
-@app.patch("/historique/{pronostic_id}")
-def enregistrer_resultat_reel(
-    pronostic_id: str, resultat_reel: str, uid: str = Depends(auth.utilisateur_courant)
-):
-    """
-    Renseigne le résultat réel d'un match une fois connu (activation
-    manuelle en complément de la vérification automatique). Réservé à
-    l'admin — resultat_reel doit valoir "V1", "NUL" ou "V2".
-    """
-    auth.exiger_admin(uid)
-    if not db.get_client():
-        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
-    if resultat_reel not in ("V1", "NUL", "V2"):
-        raise HTTPException(400, "resultat_reel doit être 'V1', 'NUL' ou 'V2'")
-
-    ligne = repo.obtenir_pronostic(pronostic_id)
-    if not ligne:
-        raise HTTPException(404, "Pronostic introuvable")
-
-    predit = _resultat_predit(ligne["probabilite_v1"], ligne["probabilite_nul"], ligne["probabilite_v2"])
-    correct = predit == resultat_reel
-    repo.marquer_pronostic_verifie(pronostic_id, resultat_reel, correct)
-
-    return {"id": pronostic_id, "resultatReel": resultat_reel, "correct": correct}
-
-
-@app.get("/historique/stats")
-def stats_fiabilite(uid: str = Depends(auth.utilisateur_courant)):
-    """Statistiques globales de fiabilité, tous utilisateurs confondus — réservé à l'admin."""
-    auth.exiger_admin(uid)
-    if not db.get_client():
-        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
-
-    stats = repo.stats_fiabilite()
-    total = stats["total"]
-    corrects = stats["corrects"]
-
-    return {
-        "total_pronostics_verifies": total,
-        "pronostics_corrects": corrects,
-        "taux_reussite": round(corrects / total, 3) if total > 0 else None,
-    }
-
-
-async def _verifier_un_pronostic(p: Dict[str, Any]) -> bool:
-    """
-    Tente de vérifier UN pronostic en re-consultant BeSoccer. Renvoie True
-    si un résultat a été trouvé et enregistré, False sinon (match pas
-    encore joué, ou dernier match contre quelqu'un d'autre pour l'instant).
-    """
-    resultat_equipe1 = await besoccer.verifier_dernier_match(p["equipe1"], p["equipe2"])
-    if resultat_equipe1 is None:
-        return False
-
-    correspondance = {"V": "V1", "N": "NUL", "D": "V2"}
-    resultat_reel = correspondance[resultat_equipe1]
-    predit = _resultat_predit(p["probabilite_v1"], p["probabilite_nul"], p["probabilite_v2"])
-
-    repo.marquer_pronostic_verifie(p["id"], resultat_reel, predit == resultat_reel)
-    return True
-
-
-@app.post("/taches/verifier-resultats")
-async def tache_verifier_resultats(limite: int = 20, uid: str = Depends(auth.utilisateur_courant)):
-    """
-    Vérification AUTOMATIQUE des pronostics en attente — à appeler
-    périodiquement par un déclencheur externe (ex: cron-job.org), avec
-    l'en-tête "Authorization: Bearer TON_MOT_DE_PASSE_ADMIN" configuré
-    dans les headers personnalisés du cron job.
-    """
-    auth.exiger_admin(uid)
-    if not db.get_client():
-        raise HTTPException(503, "Base de données non configurée sur ce déploiement")
-
-    en_attente = repo.lister_pronostics_non_verifies(limite)
-
-    nouvellement_verifies = 0
-    for p in en_attente:
-        try:
-            if await _verifier_un_pronostic(p):
-                nouvellement_verifies += 1
-        except Exception:
-            continue
-
-    return {
-        "pronostics_examines": len(en_attente),
-        "nouvellement_verifies": nouvellement_verifies,
-    }
 
 
 # ==== Codes VIP (porte dérobée admin) ====
@@ -567,7 +474,7 @@ def _generer_code_aleatoire(longueur: int = 8) -> str:
     return "".join(random.choice(caracteres) for _ in range(longueur))
 
 
-@app.post("/admin/codes-vip")
+@app.post("/admin/codes-vip", tags=["✏️ Admin — Actions"])
 def admin_generer_code(requete: GenererCodeRequest, uid: str = Depends(auth.utilisateur_courant)):
     """Génère un code VIP activable manuellement — porte dérobée admin."""
     auth.exiger_admin(uid)
@@ -587,7 +494,7 @@ def admin_generer_code(requete: GenererCodeRequest, uid: str = Depends(auth.util
     return {"code": code, "dureeJours": requete.duree_jours}
 
 
-@app.get("/admin/codes-vip")
+@app.get("/admin/codes-vip", tags=["📖 Admin — Diagnostic"])
 def admin_lister_codes(uid: str = Depends(auth.utilisateur_courant)):
     auth.exiger_admin(uid)
     if not db.get_client():
@@ -595,7 +502,7 @@ def admin_lister_codes(uid: str = Depends(auth.utilisateur_courant)):
     return repo.lister_codes_vip()
 
 
-@app.post("/vip/activer-code")
+@app.post("/vip/activer-code", tags=["✏️ VIP — Actions"])
 def vip_activer_code(requete: ActiverCodeRequest, uid: str = Depends(auth.utilisateur_courant)):
     """Active le VIP sur le compte connecté, à partir d'un code généré par l'admin."""
     if not db.get_client():
@@ -624,7 +531,7 @@ def vip_activer_code(requete: ActiverCodeRequest, uid: str = Depends(auth.utilis
     return {"active": True, "vipExpireLe": nouvelle_expiration.isoformat()}
 
 
-@app.delete("/compte")
+@app.delete("/compte", tags=["✏️ Compte — Actions"])
 def supprimer_compte(uid: str = Depends(auth.utilisateur_courant)):
     """
     Suppression DÉFINITIVE du compte et de toutes les données associées
@@ -654,7 +561,7 @@ class DebugAnalyseRequest(BaseModel):
     typeMatch: str
 
 
-@app.post("/debug/analyser-match")
+@app.post("/debug/analyser-match", tags=["✏️ Admin — Actions"])
 async def debug_analyser_match(requete: DebugAnalyseRequest, uid: str = Depends(auth.utilisateur_courant)):
     """
     🔧 Fait tourner EXACTEMENT le même moteur de pronostic que
