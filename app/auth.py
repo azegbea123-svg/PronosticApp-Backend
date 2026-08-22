@@ -53,3 +53,8 @@ async def utilisateur_courant(authorization: Optional[str] = Header(None)) -> st
             pass  # ne doit jamais faire échouer l'authentification elle-même
 
     return uid
+
+
+def supprimer_compte_firebase(uid: str) -> None:
+    """Supprime définitivement le compte Firebase Authentication (irréversible)."""
+    firebase_auth.delete_user(uid)

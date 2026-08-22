@@ -334,3 +334,23 @@ def marquer_paiement_traite(tx_reference: str) -> None:
     if not client:
         return
     client.collection(COLLECTION_PAIEMENTS).document(tx_reference).update({"traite": True})
+
+
+# ==== Suppression de compte (droit à l'effacement) ====
+
+def supprimer_toutes_donnees_utilisateur(uid: str) -> None:
+    """
+    Supprime toutes les données Firestore associées à un compte : ses
+    pronostics et son profil (statut VIP inclus). Ne touche pas au compte
+    Firebase Authentication lui-même — ça, c'est fait séparément via
+    auth.supprimer_compte_firebase().
+    """
+    client = db.get_client()
+    if not client:
+        return
+
+    docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
+    for doc in docs:
+        doc.reference.delete()
+
+    client.collection(COLLECTION_UTILISATEURS).document(uid).delete()

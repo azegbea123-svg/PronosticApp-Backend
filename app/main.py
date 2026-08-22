@@ -622,3 +622,69 @@ def vip_activer_code(requete: ActiverCodeRequest, uid: str = Depends(auth.utilis
     repo.marquer_code_utilise(code, uid)
 
     return {"active": True, "vipExpireLe": nouvelle_expiration.isoformat()}
+
+
+@app.delete("/compte")
+def supprimer_compte(uid: str = Depends(auth.utilisateur_courant)):
+    """
+    Suppression DÉFINITIVE du compte et de toutes les données associées
+    (pronostics, profil, statut VIP) — conforme à l'exigence Google Play
+    de pouvoir supprimer son compte depuis l'application. Irréversible.
+    """
+    try:
+        repo.supprimer_toutes_donnees_utilisateur(uid)
+    except Exception as e:
+        # On tente quand même la suppression du compte Firebase ensuite,
+        # mais on garde une trace de l'erreur au lieu de la faire
+        # disparaître silencieusement (un vrai souci ici doit être visible
+        # dans les logs, pas juste ignoré).
+        print(f"⚠️ Erreur lors de la suppression des données Firestore pour {uid} : {e}")
+
+    try:
+        auth.supprimer_compte_firebase(uid)
+    except Exception as e:
+        raise HTTPException(500, f"Erreur lors de la suppression du compte : {e}")
+
+    return {"supprime": True}
+
+
+class DebugAnalyseRequest(BaseModel):
+    equipe1: str
+    equipe2: str
+    typeMatch: str
+    mot_de_passe_admin: str
+
+
+@app.post("/debug/analyser-match")
+async def debug_analyser_match(requete: DebugAnalyseRequest):
+    """
+    🔧 Fait tourner EXACTEMENT le même moteur de pronostic que
+    /match/analyse (mêmes sources, même modèle Poisson, même recherche
+    ELO), mais protégé par le mot de passe admin au lieu d'un compte
+    utilisateur — pour débugger sans avoir besoin d'un jeton Firebase.
+    Aucun quota, aucun enregistrement en base.
+    """
+    if requete.mot_de_passe_admin != MOT_DE_PASSE_ADMIN:
+        raise HTTPException(403, "Mot de passe admin incorrect")
+
+    stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
+        _stats_toutes_sources(requete.equipe1),
+        _stats_toutes_sources(requete.equipe2),
+        _elo_confrontation_sure(requete.equipe1, requete.equipe2),
+    )
+
+    resultat = generer_pronostic(
+        requete.equipe1,
+        requete.equipe2,
+        requete.typeMatch,
+        stats1_sources,
+        stats2_sources,
+        elo_confrontation=elo_confrontation,
+    )
+
+    # Infos brutes en plus, utiles pour comprendre le calcul en détail
+    resultat["_debug_stats1_sources"] = stats1_sources
+    resultat["_debug_stats2_sources"] = stats2_sources
+    resultat["_debug_elo_confrontation"] = elo_confrontation
+
+    return resultat
