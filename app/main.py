@@ -130,7 +130,7 @@ async def debug_besoccer(equipe: str, uid: str = Depends(auth.utilisateur_couran
                 r = await client.get(url, headers=HEADERS, timeout=10.0)
                 essai: Dict[str, Any] = {"url": url, "status_code": r.status_code}
                 if r.status_code == 200:
-                    stats = _extraire_forme_recente(r.text)
+                    stats = _extraire_forme_recente(r.text, slug)
                     essai["stats_extraites"] = stats
                     resultat["essais"].append(essai)
                     break

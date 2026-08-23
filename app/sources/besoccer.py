@@ -111,13 +111,20 @@ async def _trouver_page_equipe(client: httpx.AsyncClient, nom_equipe: str) -> Op
     return None
 
 
-def _extraire_forme_recente(html: str, n: int = 5) -> Optional[Dict[str, Any]]:
+def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional[Dict[str, Any]]:
     """
     Parcourt tous les liens /match/... de la page et identifie ceux qui
     contiennent un score avec une partie en gras (= score de l'équipe de
     la page). Dédoublonne par URL de match pour éviter de compter deux
     fois le même match s'il apparaît dans plusieurs sections de la page
     (ex: "Last match" ET "Form in last matches").
+
+    Distingue aussi domicile/extérieur pour chaque match : l'URL suit le
+    format /match/{domicile}/{exterieur}/{id} — l'équipe listée en
+    PREMIER est toujours celle qui recevait (confirmé par inspection
+    réelle de page BeSoccer). En comparant slug_equipe à cette première
+    position, on sait si CE match précis était à domicile ou à
+    l'extérieur pour l'équipe qu'on analyse.
     """
     soup = BeautifulSoup(html, "html.parser")
 
@@ -125,6 +132,9 @@ def _extraire_forme_recente(html: str, n: int = 5) -> Optional[Dict[str, Any]]:
     resultats: List[str] = []
     buts_marques = 0
     buts_encaisses = 0
+
+    dom_buts_marques = dom_buts_encaisses = dom_matchs = 0
+    ext_buts_marques = ext_buts_encaisses = ext_matchs = 0
 
     for lien in soup.find_all("a", href=re.compile(r"/match/")):
         href = lien.get("href", "")
@@ -158,6 +168,22 @@ def _extraire_forme_recente(html: str, n: int = 5) -> Optional[Dict[str, Any]]:
         buts_marques += score_propre
         buts_encaisses += score_adverse
 
+        # Domicile/extérieur pour CE match précis
+        parties = [p for p in href.split("/") if p]
+        try:
+            i = parties.index("match")
+            etait_domicile = parties[i + 1] == slug_equipe
+            if etait_domicile:
+                dom_matchs += 1
+                dom_buts_marques += score_propre
+                dom_buts_encaisses += score_adverse
+            else:
+                ext_matchs += 1
+                ext_buts_marques += score_propre
+                ext_buts_encaisses += score_adverse
+        except (ValueError, IndexError):
+            pass  # format d'URL inattendu : on garde quand même le score global
+
         if score_propre > score_adverse:
             resultats.append("V")
         elif score_propre == score_adverse:
@@ -171,12 +197,27 @@ def _extraire_forme_recente(html: str, n: int = 5) -> Optional[Dict[str, Any]]:
     if not resultats:
         return None
 
-    return {
+    resultat: Dict[str, Any] = {
         "forme": resultats,
         "buts_marques": buts_marques,
         "buts_encaisses": buts_encaisses,
         "matchs_analyses": len(resultats),
     }
+
+    if dom_matchs > 0:
+        resultat["domicile"] = {
+            "buts_marques": dom_buts_marques,
+            "buts_encaisses": dom_buts_encaisses,
+            "matchs_analyses": dom_matchs,
+        }
+    if ext_matchs > 0:
+        resultat["exterieur"] = {
+            "buts_marques": ext_buts_marques,
+            "buts_encaisses": ext_buts_encaisses,
+            "matchs_analyses": ext_matchs,
+        }
+
+    return resultat
 
 
 def _extraire_indisponibles(html: str) -> Optional[int]:
@@ -219,8 +260,8 @@ async def get_team_stats(nom_equipe: str) -> Optional[Dict[str, Any]]:
         trouve = await _trouver_page_equipe(client, nom_equipe)
         if not trouve:
             return None
-        html, _slug = trouve
-        stats = _extraire_forme_recente(html)
+        html, slug = trouve
+        stats = _extraire_forme_recente(html, slug)
         if stats is None:
             return None
         stats["source"] = "BeSoccer"

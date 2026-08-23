@@ -31,6 +31,18 @@ MAX_BUTS_SIMULES = 6        # borne de la grille de scores simulés (au-delà, p
 PENALITE_MIN_INDISPONIBLES = 0.70  # plancher : -30% de force max, même avec beaucoup d'absents
 
 
+def _fusionner_sous_bloc(stats_sources: List[Dict[str, Any]], cle: str) -> Optional[Dict[str, Any]]:
+    """Fusionne le sous-bloc 'domicile' ou 'exterieur' de plusieurs sources, même logique que _fusionner_stats."""
+    blocs = [s[cle] for s in stats_sources if s.get(cle)]
+    if not blocs:
+        return None
+    return {
+        "matchs_analyses": sum(b["matchs_analyses"] for b in blocs),
+        "buts_marques": sum(b["buts_marques"] for b in blocs),
+        "buts_encaisses": sum(b["buts_encaisses"] for b in blocs),
+    }
+
+
 def _fusionner_stats(stats_sources: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
     Combine les stats de plusieurs sources pour une même équipe.
@@ -62,6 +74,8 @@ def _fusionner_stats(stats_sources: List[Dict[str, Any]]) -> Optional[Dict[str, 
         "formes_par_source": [
             (s.get("source", "?"), s.get("forme", [])) for s in stats_sources if s.get("forme")
         ],
+        "domicile": _fusionner_sous_bloc(stats_sources, "domicile"),
+        "exterieur": _fusionner_sous_bloc(stats_sources, "exterieur"),
     }
 
 
@@ -154,6 +168,27 @@ def _marches_supplementaires(grille: Dict[Tuple[int, int], float]) -> Dict[str, 
     }
 
 
+def _facteur_contexte_domicile_exterieur(
+    nom: str, stats_globales: Optional[Dict[str, Any]], stats_utilisees: Optional[Dict[str, Any]], label: str
+) -> Optional[str]:
+    """
+    Si les stats effectivement utilisées pour le calcul (domicile ou
+    extérieur) sont différentes des stats globales (mélangées), génère
+    une ligne de transparence avec les VRAIS chiffres utilisés — jamais
+    juste une affirmation sans les chiffres derrière.
+    """
+    if not stats_globales or not stats_utilisees:
+        return None
+    if stats_utilisees is stats_globales:
+        return None  # pas de sous-bloc disponible, repli déjà sur le global — rien à signaler
+
+    return (
+        f"{nom} — {stats_utilisees['buts_marques']} buts marqués / {stats_utilisees['buts_encaisses']} "
+        f"encaissés sur ses {stats_utilisees['matchs_analyses']} derniers matchs {label} uniquement "
+        f"(plus précis que ses stats générales)"
+    )
+
+
 def _facteurs(nom: str, stats: Optional[Dict[str, Any]]) -> List[str]:
     if not stats:
         return [f"Aucune donnée récente trouvée pour {nom} (sources indisponibles)"]
@@ -206,6 +241,26 @@ def _facteur_elo(elo_equipe1: Optional[float], elo_equipe2: Optional[float]) -> 
     return 2 * part1, 2 * (1 - part1)
 
 
+def _choisir_stats_contexte(stats_globales: Optional[Dict[str, Any]], sous_bloc: str) -> Optional[Dict[str, Any]]:
+    """
+    Utilise les statistiques spécifiquement "à domicile" ou "à
+    l'extérieur" pour CE match précis quand elles existent (au moins 1
+    match dans ce sous-bloc), sinon retombe sur les statistiques
+    globales (mélangées) — mieux vaut une donnée générale que rien.
+
+    Une équipe peut être solide à domicile et fébrile en déplacement (ou
+    l'inverse) — mélanger les deux masque cet écart, pourtant fréquent
+    en football. Les indisponibilités, elles, ne sont PAS scindées
+    (une blessure compte pareil, à domicile ou à l'extérieur).
+    """
+    if not stats_globales:
+        return None
+    bloc = stats_globales.get(sous_bloc)
+    if bloc and bloc.get("matchs_analyses", 0) > 0:
+        return {**bloc, "indisponibles": stats_globales.get("indisponibles")}
+    return stats_globales
+
+
 def generer_pronostic(
     equipe1: str,
     equipe2: str,
@@ -217,8 +272,13 @@ def generer_pronostic(
     stats1 = _fusionner_stats(stats1_sources)
     stats2 = _fusionner_stats(stats2_sources)
 
-    force_att1, faib_def1 = _force_attaque_defense(stats1)
-    force_att2, faib_def2 = _force_attaque_defense(stats2)
+    # equipe1 reçoit dans CE match -> ses stats "à domicile" si connues ;
+    # equipe2 se déplace -> ses stats "à l'extérieur" si connues.
+    stats1_contexte = _choisir_stats_contexte(stats1, "domicile")
+    stats2_contexte = _choisir_stats_contexte(stats2, "exterieur")
+
+    force_att1, faib_def1 = _force_attaque_defense(stats1_contexte)
+    force_att2, faib_def2 = _force_attaque_defense(stats2_contexte)
 
     lambda1 = force_att1 * faib_def2 * MOYENNE_BUTS_LIGUE * AVANTAGE_DOMICILE
     lambda2 = force_att2 * faib_def1 * MOYENNE_BUTS_LIGUE
@@ -234,6 +294,13 @@ def generer_pronostic(
     marches = _marches_supplementaires(grille)
 
     facteurs = _facteurs(equipe1, stats1) + _facteurs(equipe2, stats2)
+
+    facteur_dom = _facteur_contexte_domicile_exterieur(equipe1, stats1, stats1_contexte, "à domicile")
+    if facteur_dom:
+        facteurs.append(facteur_dom)
+    facteur_ext = _facteur_contexte_domicile_exterieur(equipe2, stats2, stats2_contexte, "à l'extérieur")
+    if facteur_ext:
+        facteurs.append(facteur_ext)
 
     if elo_confrontation:
         facteurs.append(
