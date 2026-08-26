@@ -30,7 +30,7 @@ AVANTAGE_DOMICILE = 1.15    # multiplicateur "championnat" par défaut — voir 
 MAX_BUTS_SIMULES = 6        # borne de la grille de scores simulés (au-delà, probabilité négligeable)
 PENALITE_MIN_INDISPONIBLES = 0.70  # plancher : -30% de force max, même avec beaucoup d'absents
 POIDS_DECROISSANCE_ANCIENNETE = 0.85  # chaque match plus ancien pèse 15% de moins que le précédent
-POIDS_LISSAGE = 5  # équivaut à "ajouter" 5 matchs fictifs à la moyenne (shrinkage petits échantillons)
+POIDS_LISSAGE = 3  # ajusté empiriquement (voir backtest) — ⚠️ optimisé sur le même échantillon que testé, pas une validation indépendante ; réduit aussi une partie de la protection contre les petits échantillons extrêmes (cas Arsenal/Coventry) qui avait motivé la valeur initiale de 5
 RHO_DIXON_COLES = -0.20  # ajusté empiriquement (voir backtest) — meilleure précision sur les nuls que -0.10
 
 # ⚠️ Catégorisation du type de match — jusqu'ici `type_match` ne servait
