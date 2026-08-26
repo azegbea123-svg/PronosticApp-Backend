@@ -26,12 +26,55 @@ import math
 from typing import Optional, Dict, Any, List, Tuple
 
 MOYENNE_BUTS_LIGUE = 1.35   # buts marqués par équipe et par match, moyenne généraliste
-AVANTAGE_DOMICILE = 1.15    # multiplicateur appliqué à l'attaque de l'équipe qui reçoit
+AVANTAGE_DOMICILE = 1.15    # multiplicateur "championnat" par défaut — voir CATEGORIES_MATCH pour les autres
 MAX_BUTS_SIMULES = 6        # borne de la grille de scores simulés (au-delà, probabilité négligeable)
 PENALITE_MIN_INDISPONIBLES = 0.70  # plancher : -30% de force max, même avec beaucoup d'absents
 POIDS_DECROISSANCE_ANCIENNETE = 0.85  # chaque match plus ancien pèse 15% de moins que le précédent
 POIDS_LISSAGE = 5  # équivaut à "ajouter" 5 matchs fictifs à la moyenne (shrinkage petits échantillons)
 RHO_DIXON_COLES = -0.10  # corrélation basses-scores, valeur de référence (Dixon & Coles, 1997)
+
+# ⚠️ Catégorisation du type de match — jusqu'ici `type_match` ne servait
+# qu'à écrire une phrase dans le résumé, sans influencer le calcul. Ce
+# qui suit reste une estimation raisonnée (pas des coefficients publiés
+# et validés comme Dixon-Coles), à affiner avec l'usage réel :
+#   - "avantage_domicile" : une finale de coupe se joue souvent sur
+#     terrain neutre -> aucun avantage à annuler ; un match amical a un
+#     avantage domicile réel mais atténué (enjeu réduit, ambiance moindre)
+#   - "confiance_max" : plafonne la confiance accordée à la forme
+#     récente avant mélange avec l'ELO — pertinent pour les amicaux
+#     (compositions rotées, peu représentatives du niveau réel) et les
+#     sélections nationales (les joueurs se retrouvent rarement, la
+#     "forme d'équipe" au sens club n'a pas le même sens)
+CATEGORIES_MATCH: Dict[str, Dict[str, float]] = {
+    "championnat": {"avantage_domicile": 1.15, "confiance_max": 1.0},
+    "coupe": {"avantage_domicile": 1.10, "confiance_max": 0.9},
+    "finale": {"avantage_domicile": 1.00, "confiance_max": 0.9},
+    "amical": {"avantage_domicile": 1.05, "confiance_max": 0.5},
+    "selection_nationale": {"avantage_domicile": 1.10, "confiance_max": 0.7},
+}
+
+
+def _categoriser_match(type_match: str) -> str:
+    """
+    Classe le type de match saisi (texte libre) dans une des catégories
+    de CATEGORIES_MATCH, par simple recherche de mots-clés. Par défaut,
+    tout ce qui n'est pas reconnu est traité comme un "championnat"
+    classique — l'hypothèse la plus courante et la plus sûre.
+    """
+    texte = type_match.lower()
+
+    if any(mot in texte for mot in ("amical", "friendly", "friendlies")):
+        return "amical"
+    if any(mot in texte for mot in ("finale", "final")):
+        return "finale"
+    if any(mot in texte for mot in ("coupe", "cup", "copa", "pokal", "trophy", "trophee")):
+        return "coupe"
+    if any(
+        mot in texte
+        for mot in ("sélection", "selection", "national team", "u17", "u18", "u19", "u20", "u21", "u23", "olympique", "olympic")
+    ):
+        return "selection_nationale"
+    return "championnat"
 
 
 def _fusionner_sous_bloc(stats_sources: List[Dict[str, Any]], cle: str) -> Optional[Dict[str, Any]]:
@@ -368,6 +411,9 @@ def generer_pronostic(
     stats1 = _fusionner_stats(stats1_sources)
     stats2 = _fusionner_stats(stats2_sources)
 
+    categorie = _categoriser_match(type_match)
+    parametres_categorie = CATEGORIES_MATCH[categorie]
+
     # equipe1 reçoit dans CE match -> ses stats "à domicile" si connues ;
     # equipe2 se déplace -> ses stats "à l'extérieur" si connues.
     stats1_contexte = _choisir_stats_contexte(stats1, domicile=True)
@@ -376,7 +422,14 @@ def generer_pronostic(
     force_att1, faib_def1, confiance1 = _force_attaque_defense(stats1_contexte)
     force_att2, faib_def2, confiance2 = _force_attaque_defense(stats2_contexte)
 
-    lambda1 = force_att1 * faib_def2 * MOYENNE_BUTS_LIGUE * AVANTAGE_DOMICILE
+    # Confiance plafonnée selon la catégorie détectée (ex: un amical ne
+    # peut jamais atteindre une confiance de 1.0, même avec 5 matchs
+    # récents pondérés — les compositions y sont trop souvent rotées
+    # pour que la forme récente soit pleinement représentative).
+    confiance1 = min(confiance1, parametres_categorie["confiance_max"])
+    confiance2 = min(confiance2, parametres_categorie["confiance_max"])
+
+    lambda1 = force_att1 * faib_def2 * MOYENNE_BUTS_LIGUE * parametres_categorie["avantage_domicile"]
     lambda2 = force_att2 * faib_def1 * MOYENNE_BUTS_LIGUE
 
     elo1 = elo_confrontation.get("elo_equipe1") if elo_confrontation else None
@@ -404,6 +457,15 @@ def generer_pronostic(
     facteur_ext = _facteur_contexte_domicile_exterieur(equipe2, stats2, stats2_contexte, "à l'extérieur")
     if facteur_ext:
         facteurs.append(facteur_ext)
+
+    if categorie != "championnat":
+        libelles = {
+            "coupe": "match de coupe",
+            "finale": "finale (avantage du terrain neutralisé)",
+            "amical": "match amical (forme récente moins déterminante)",
+            "selection_nationale": "sélection nationale",
+        }
+        facteurs.append(f"Type de rencontre détecté : {libelles[categorie]}")
 
     if elo_confrontation:
         facteurs.append(
