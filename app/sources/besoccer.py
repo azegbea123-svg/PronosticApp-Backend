@@ -172,12 +172,17 @@ def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional
         buts_marques += score_propre
         buts_encaisses += score_adverse
 
-        # Domicile/extérieur pour CE match précis
+        # Domicile/extérieur pour CE match précis, + slug de l'adversaire
+        # (nécessaire pour retrouver ce match précis plus tard, quand on
+        # cherche à vérifier une prédiction enregistrée au préalable).
         parties = [p for p in href.split("/") if p]
         etait_domicile: Optional[bool] = None
+        adversaire_slug: Optional[str] = None
         try:
             i = parties.index("match")
-            etait_domicile = parties[i + 1] == slug_equipe
+            slug_domicile, slug_exterieur = parties[i + 1], parties[i + 2]
+            etait_domicile = slug_domicile == slug_equipe
+            adversaire_slug = slug_exterieur if etait_domicile else slug_domicile
             if etait_domicile:
                 dom_matchs += 1
                 dom_buts_marques += score_propre
@@ -194,6 +199,7 @@ def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional
                 "buts_pour": score_propre,
                 "buts_contre": score_adverse,
                 "domicile": etait_domicile,  # None si format d'URL inattendu
+                "adversaire_slug": adversaire_slug,
             }
         )
 
@@ -280,6 +286,7 @@ async def get_team_stats(nom_equipe: str) -> Optional[Dict[str, Any]]:
             return None
         stats["source"] = "BeSoccer"
         stats["indisponibles"] = _extraire_indisponibles(html)
+        stats["slug"] = slug
         return stats
 
 

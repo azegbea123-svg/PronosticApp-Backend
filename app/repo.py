@@ -22,6 +22,7 @@ COLLECTION_PRONOSTICS = "pronostics"
 COLLECTION_UTILISATEURS = "utilisateurs"
 COLLECTION_CODES_VIP = "codes_vip"
 COLLECTION_PAIEMENTS = "paiements_en_attente"
+COLLECTION_PREDICTIONS_BACKTEST = "predictions_backtest"
 
 
 def _maintenant():
@@ -249,3 +250,97 @@ def supprimer_toutes_donnees_utilisateur(uid: str) -> None:
         doc.reference.delete()
 
     client.collection(COLLECTION_UTILISATEURS).document(uid).delete()
+
+
+# ==== Collecte progressive de matchs pour le backtest ====
+#
+# Contrairement à l'historique/vérification retiré précédemment (jugé
+# redondant avec BeSoccer), ceci sert un but différent et bien réel :
+# BeSoccer ne donne que la forme ACTUELLE d'une équipe, jamais sa forme
+# à une date passée précise. Un backtest sur de vrais matchs anciens est
+# donc invalide (biais temporel découvert empiriquement). En enregistrant
+# la prédiction juste AVANT le match, puis en constatant le résultat
+# quelques jours après, chaque match ajouté ici reste valide pour de
+# vrai, et la base grossit naturellement au fil du temps.
+
+def enregistrer_prediction_backtest(
+    equipe1: str,
+    equipe2: str,
+    type_match: str,
+    slug1: Optional[str],
+    slug2: Optional[str],
+    probabilite_v1: float,
+    probabilite_nul: float,
+    probabilite_v2: float,
+) -> str:
+    """Enregistre une prédiction en attente de vérification. Renvoie l'ID du document créé."""
+    client = db.get_client()
+    if not client:
+        raise RuntimeError("Firestore non configuré")
+
+    doc_ref = client.collection(COLLECTION_PREDICTIONS_BACKTEST).document()
+    doc_ref.set({
+        "equipe1": equipe1,
+        "equipe2": equipe2,
+        "type_match": type_match,
+        "slug1": slug1,
+        "slug2": slug2,
+        "probabilite_v1": probabilite_v1,
+        "probabilite_nul": probabilite_nul,
+        "probabilite_v2": probabilite_v2,
+        "date_prediction": _maintenant(),
+        "verifie": False,
+        "resultat_reel": None,
+    })
+    return doc_ref.id
+
+
+def lister_predictions_en_attente(limite: int = 50) -> List[Dict[str, Any]]:
+    """Renvoie les prédictions pas encore vérifiées, les plus anciennes en premier."""
+    client = db.get_client()
+    if not client:
+        return []
+
+    query = (
+        client.collection(COLLECTION_PREDICTIONS_BACKTEST)
+        .where("verifie", "==", False)
+        .order_by("date_prediction")
+        .limit(limite)
+    )
+    resultats = []
+    for doc in query.stream():
+        d = doc.to_dict()
+        d["id"] = doc.id
+        resultats.append(d)
+    return resultats
+
+
+def marquer_prediction_verifiee(prediction_id: str, resultat_reel: str) -> None:
+    """Enregistre le résultat réel constaté et marque la prédiction comme vérifiée."""
+    client = db.get_client()
+    if not client:
+        return
+    client.collection(COLLECTION_PREDICTIONS_BACKTEST).document(prediction_id).update({
+        "verifie": True,
+        "resultat_reel": resultat_reel,
+        "date_verification": _maintenant(),
+    })
+
+
+def lister_predictions_verifiees(limite: int = 500) -> List[Dict[str, Any]]:
+    """Renvoie les prédictions déjà vérifiées — c'est le vrai jeu de backtest valide, qui grossit dans le temps."""
+    client = db.get_client()
+    if not client:
+        return []
+
+    query = (
+        client.collection(COLLECTION_PREDICTIONS_BACKTEST)
+        .where("verifie", "==", True)
+        .limit(limite)
+    )
+    resultats = []
+    for doc in query.stream():
+        d = doc.to_dict()
+        d["id"] = doc.id
+        resultats.append(d)
+    return resultats

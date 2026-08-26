@@ -708,3 +708,130 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
         "taux_reussite_1x2": round(corrects_1x2 / total_valides, 3) if total_valides > 0 else None,
         "details": details,
     }
+
+
+# ==== Collecte progressive de matchs pour le backtest ====
+
+class CollecteRequest(BaseModel):
+    equipe1: str
+    equipe2: str
+    typeMatch: str
+
+
+@app.post("/debug/collecte-prediction", tags=["✏️ Admin — Actions"])
+async def debug_collecte_prediction(requete: CollecteRequest, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Enregistre une prédiction pour un match PAS ENCORE JOUÉ, en vue
+    d'une vérification ultérieure (voir /debug/verifier-predictions).
+    C'est la bonne façon de construire un jeu de backtest dans la durée
+    sans le biais temporel découvert avec des matchs déjà anciens : la
+    prédiction est capturée au bon moment, juste avant le coup d'envoi.
+    """
+    auth.exiger_admin(uid)
+
+    stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
+        _stats_toutes_sources(requete.equipe1),
+        _stats_toutes_sources(requete.equipe2),
+        _elo_confrontation_sure(requete.equipe1, requete.equipe2),
+    )
+
+    resultat = generer_pronostic(
+        requete.equipe1, requete.equipe2, requete.typeMatch,
+        stats1_sources, stats2_sources,
+        elo_confrontation=elo_confrontation,
+    )
+
+    slug1 = next((s.get("slug") for s in stats1_sources if s.get("slug")), None)
+    slug2 = next((s.get("slug") for s in stats2_sources if s.get("slug")), None)
+
+    prediction_id = repo.enregistrer_prediction_backtest(
+        requete.equipe1, requete.equipe2, requete.typeMatch,
+        slug1, slug2,
+        resultat["probabiliteVictoireEquipe1"],
+        resultat["probabiliteMatchNul"],
+        resultat["probabiliteVictoireEquipe2"],
+    )
+
+    return {
+        "id": prediction_id,
+        "equipe1": requete.equipe1,
+        "equipe2": requete.equipe2,
+        "probabilites": {
+            "V1": resultat["probabiliteVictoireEquipe1"],
+            "NUL": resultat["probabiliteMatchNul"],
+            "V2": resultat["probabiliteVictoireEquipe2"],
+        },
+        "message": "Prédiction enregistrée — repasse dans quelques jours avec /debug/verifier-predictions",
+    }
+
+
+@app.post("/debug/verifier-predictions", tags=["✏️ Admin — Actions"])
+async def debug_verifier_predictions(uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Reprend toutes les prédictions en attente et vérifie si le match a
+    été joué depuis (en cherchant, dans la forme récente ACTUELLE des
+    deux équipes sur BeSoccer, un match les opposant l'une à l'autre).
+    Réservé admin — à appeler périodiquement (manuellement ou via un
+    cron externe), quelques jours après avoir collecté des prédictions.
+    """
+    auth.exiger_admin(uid)
+
+    en_attente = repo.lister_predictions_en_attente(limite=50)
+    verifiees = 0
+    toujours_en_attente = 0
+
+    for p in en_attente:
+        try:
+            stats1 = await besoccer.get_team_stats(p["equipe1"])
+        except Exception:
+            stats1 = None
+
+        resultat_trouve = None
+        if stats1 and p.get("slug2"):
+            for m in stats1.get("matchs_detail", []):
+                if m.get("adversaire_slug") == p["slug2"]:
+                    # Match retrouvé : reconstruire V1/NUL/V2 du point de
+                    # vue de equipe1 (peu importe si elle jouait à
+                    # domicile ou à l'extérieur cette fois-là).
+                    if m["buts_pour"] > m["buts_contre"]:
+                        resultat_trouve = "V1"
+                    elif m["buts_pour"] < m["buts_contre"]:
+                        resultat_trouve = "V2"
+                    else:
+                        resultat_trouve = "NUL"
+                    break
+
+        if resultat_trouve:
+            repo.marquer_prediction_verifiee(p["id"], resultat_trouve)
+            verifiees += 1
+        else:
+            toujours_en_attente += 1
+
+    return {
+        "predictions_examinees": len(en_attente),
+        "nouvellement_verifiees": verifiees,
+        "toujours_en_attente": toujours_en_attente,
+    }
+
+
+@app.get("/debug/predictions-verifiees", tags=["📖 Admin — Diagnostic"])
+def debug_predictions_verifiees(uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Renvoie toutes les prédictions déjà vérifiées, prêtes à être
+    copiées dans /debug/backtest — le vrai jeu de test qui grossit dans
+    le temps, sans biais temporel.
+    """
+    auth.exiger_admin(uid)
+    verifiees = repo.lister_predictions_verifiees()
+
+    matchs_backtest = [
+        {
+            "equipe1": p["equipe1"],
+            "equipe2": p["equipe2"],
+            "typeMatch": p["type_match"],
+            "resultatReel": p["resultat_reel"],
+        }
+        for p in verifiees
+    ]
+
+    return {"total": len(matchs_backtest), "matchs": matchs_backtest}
