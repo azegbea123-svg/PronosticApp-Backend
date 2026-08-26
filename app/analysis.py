@@ -31,7 +31,7 @@ MAX_BUTS_SIMULES = 6        # borne de la grille de scores simulés (au-delà, p
 PENALITE_MIN_INDISPONIBLES = 0.70  # plancher : -30% de force max, même avec beaucoup d'absents
 POIDS_DECROISSANCE_ANCIENNETE = 0.85  # chaque match plus ancien pèse 15% de moins que le précédent
 POIDS_LISSAGE = 5  # équivaut à "ajouter" 5 matchs fictifs à la moyenne (shrinkage petits échantillons)
-RHO_DIXON_COLES = -0.10  # corrélation basses-scores, valeur de référence (Dixon & Coles, 1997)
+RHO_DIXON_COLES = -0.20  # ajusté empiriquement (voir backtest) — meilleure précision sur les nuls que -0.10
 
 # ⚠️ Catégorisation du type de match — jusqu'ici `type_match` ne servait
 # qu'à écrire une phrase dans le résumé, sans influencer le calcul. Ce
