@@ -621,20 +621,25 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
     réussite réel — pour mesurer objectivement la qualité du modèle
     plutôt que de juger sur un seul cas. Réservé admin, aucun quota,
     aucun enregistrement en base.
+
+    ⚠️ Traité par lots de 4 matchs en parallèle (avec courte pause entre
+    chaque lot) pour rester raisonnablement rapide sans bombarder
+    BeSoccer de requêtes — au-delà d'environ 100-150 matchs par appel,
+    le temps total risque quand même de dépasser le délai maximal d'une
+    requête HTTP (502) : mieux vaut découper un très gros fichier en
+    plusieurs appels séparés plutôt que tout envoyer d'un coup.
     """
     auth.exiger_admin(uid)
 
     details = []
     corrects_1x2 = 0
 
-    for m in requete.matchs:
+    async def _traiter_un_match(m: MatchBacktest):
         if m.resultatReel not in ("V1", "NUL", "V2"):
-            details.append({
+            return {
                 "equipe1": m.equipe1, "equipe2": m.equipe2,
                 "erreur": "resultatReel doit être 'V1', 'NUL' ou 'V2'",
-            })
-            continue
-
+            }
         try:
             stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
                 _stats_toutes_sources(m.equipe1),
@@ -647,22 +652,17 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
                 elo_confrontation=elo_confrontation,
             )
         except Exception as e:
-            details.append({
+            return {
                 "equipe1": m.equipe1, "equipe2": m.equipe2,
                 "erreur": f"{type(e).__name__}: {e}",
-            })
-            continue
+            }
 
         predit = _resultat_predit(
             resultat["probabiliteVictoireEquipe1"],
             resultat["probabiliteMatchNul"],
             resultat["probabiliteVictoireEquipe2"],
         )
-        correct = predit == m.resultatReel
-        if correct:
-            corrects_1x2 += 1
-
-        details.append({
+        return {
             "equipe1": m.equipe1,
             "equipe2": m.equipe2,
             "probabilites": {
@@ -672,9 +672,18 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
             },
             "predit": predit,
             "resultatReel": m.resultatReel,
-            "correct": correct,
-        })
+            "correct": predit == m.resultatReel,
+        }
 
+    taille_lot = 4
+    for i in range(0, len(requete.matchs), taille_lot):
+        lot = requete.matchs[i : i + taille_lot]
+        resultats_lot = await asyncio.gather(*[_traiter_un_match(m) for m in lot])
+        details.extend(resultats_lot)
+        if i + taille_lot < len(requete.matchs):
+            await asyncio.sleep(1.0)
+
+    corrects_1x2 = sum(1 for d in details if d.get("correct"))
     total_valides = len([d for d in details if "erreur" not in d])
 
     return {
