@@ -122,14 +122,18 @@ def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional
     Distingue aussi domicile/extérieur pour chaque match : l'URL suit le
     format /match/{domicile}/{exterieur}/{id} — l'équipe listée en
     PREMIER est toujours celle qui recevait (confirmé par inspection
-    réelle de page BeSoccer). En comparant slug_equipe à cette première
-    position, on sait si CE match précis était à domicile ou à
-    l'extérieur pour l'équipe qu'on analyse.
+    réelle de page BeSoccer).
+
+    Garde aussi le détail MATCH PAR MATCH (matchs_detail), dans l'ordre
+    où BeSoccer les liste (le plus récent en premier) — nécessaire pour
+    pondérer la forme récente par ancienneté plutôt que de traiter un
+    match d'il y a 5 rencontres exactement comme celui d'hier.
     """
     soup = BeautifulSoup(html, "html.parser")
 
     vus: set = set()
     resultats: List[str] = []
+    matchs_detail: List[Dict[str, Any]] = []
     buts_marques = 0
     buts_encaisses = 0
 
@@ -170,6 +174,7 @@ def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional
 
         # Domicile/extérieur pour CE match précis
         parties = [p for p in href.split("/") if p]
+        etait_domicile: Optional[bool] = None
         try:
             i = parties.index("match")
             etait_domicile = parties[i + 1] == slug_equipe
@@ -183,6 +188,14 @@ def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional
                 ext_buts_encaisses += score_adverse
         except (ValueError, IndexError):
             pass  # format d'URL inattendu : on garde quand même le score global
+
+        matchs_detail.append(
+            {
+                "buts_pour": score_propre,
+                "buts_contre": score_adverse,
+                "domicile": etait_domicile,  # None si format d'URL inattendu
+            }
+        )
 
         if score_propre > score_adverse:
             resultats.append("V")
@@ -202,6 +215,7 @@ def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional
         "buts_marques": buts_marques,
         "buts_encaisses": buts_encaisses,
         "matchs_analyses": len(resultats),
+        "matchs_detail": matchs_detail,  # plus récent en premier
     }
 
     if dom_matchs > 0:

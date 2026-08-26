@@ -29,6 +29,9 @@ MOYENNE_BUTS_LIGUE = 1.35   # buts marqués par équipe et par match, moyenne g�
 AVANTAGE_DOMICILE = 1.15    # multiplicateur appliqué à l'attaque de l'équipe qui reçoit
 MAX_BUTS_SIMULES = 6        # borne de la grille de scores simulés (au-delà, probabilité négligeable)
 PENALITE_MIN_INDISPONIBLES = 0.70  # plancher : -30% de force max, même avec beaucoup d'absents
+POIDS_DECROISSANCE_ANCIENNETE = 0.85  # chaque match plus ancien pèse 15% de moins que le précédent
+POIDS_LISSAGE = 5  # équivaut à "ajouter" 5 matchs fictifs à la moyenne (shrinkage petits échantillons)
+RHO_DIXON_COLES = -0.10  # corrélation basses-scores, valeur de référence (Dixon & Coles, 1997)
 
 
 def _fusionner_sous_bloc(stats_sources: List[Dict[str, Any]], cle: str) -> Optional[Dict[str, Any]]:
@@ -65,6 +68,15 @@ def _fusionner_stats(stats_sources: List[Dict[str, Any]]) -> Optional[Dict[str, 
     ]
     indisponibles = max(indisponibles_connus) if indisponibles_connus else None
 
+    # Fusionne le détail match par match de toutes les sources, trié pour
+    # garder un ordre chronologique cohérent même si plusieurs sources
+    # sont combinées (sans vraie date, on garde l'ordre d'apparition par
+    # source — approximation raisonnable, les sources listent déjà du
+    # plus récent au plus ancien).
+    matchs_detail: List[Dict[str, Any]] = []
+    for s in stats_sources:
+        matchs_detail.extend(s.get("matchs_detail", []))
+
     return {
         "matchs_analyses": matchs,
         "buts_marques": buts_marques,
@@ -76,17 +88,42 @@ def _fusionner_stats(stats_sources: List[Dict[str, Any]]) -> Optional[Dict[str, 
         ],
         "domicile": _fusionner_sous_bloc(stats_sources, "domicile"),
         "exterieur": _fusionner_sous_bloc(stats_sources, "exterieur"),
+        "matchs_detail": matchs_detail,
     }
 
 
-def _force_attaque_defense(stats: Optional[Dict[str, Any]]) -> Tuple[float, float]:
+def _stats_ponderees_depuis_detail(matchs_detail: List[Dict[str, Any]]) -> Tuple[float, float, float]:
     """
-    Renvoie (force d'attaque, faiblesse défensive), normalisées à 1.0 =
-    dans la moyenne. Sans donnée : (1.0, 1.0), hypothèse neutre plutôt
-    qu'un biais arbitraire dans un sens ou l'autre.
+    Calcule les buts marqués/encaissés en pondérant chaque match par son
+    ancienneté : le plus récent pèse plein pot (poids 1.0), chaque match
+    plus ancien un peu moins (x0.85 à chaque cran) — un match d'il y a 5
+    rencontres ne doit pas peser autant que celui d'hier, la forme d'une
+    équipe pouvant changer vite (nouvel entraîneur, retour de blessés...).
+
+    Renvoie aussi le poids total, qui sert de "taille d'échantillon
+    effective" — à la fois pour le lissage ci-dessous et pour doser la
+    confiance à accorder à la forme récente face à l'ELO (voir plus bas).
+    """
+    poids_total = 0.0
+    marques_pond = 0.0
+    encaisses_pond = 0.0
+    for i, m in enumerate(matchs_detail):
+        poids = POIDS_DECROISSANCE_ANCIENNETE ** i
+        marques_pond += m["buts_pour"] * poids
+        encaisses_pond += m["buts_contre"] * poids
+        poids_total += poids
+    return marques_pond, encaisses_pond, poids_total
+
+
+def _force_attaque_defense(stats: Optional[Dict[str, Any]]) -> Tuple[float, float, float]:
+    """
+    Renvoie (force d'attaque, faiblesse défensive, confiance) — les deux
+    premiers normalisés à 1.0 = dans la moyenne, le troisième entre 0 et
+    1 reflétant la fiabilité de l'échantillon (peu de matchs récents
+    pondérés = confiance faible, utilisé ensuite pour doser l'ELO).
 
     ⚠️ Lissage statistique appliqué (shrinkage) : sur un petit échantillon
-    (3-5 matchs), un taux brut peut être extrême par pur hasard — ex: une
+    pondéré, un taux brut peut être extrême par pur hasard — ex: une
     équipe qui n'a encaissé qu'1 but en 4 matchs (contre des adversaires
     faibles, ou juste par chance) ressort comme "défensivement excellente"
     alors que ce n'est pas forcément représentatif. On mélange le taux
@@ -98,13 +135,20 @@ def _force_attaque_defense(stats: Optional[Dict[str, Any]]) -> Tuple[float, floa
     trop petit et non représentatif).
     """
     if not stats or stats["matchs_analyses"] == 0:
-        return 1.0, 1.0
+        return 1.0, 1.0, 0.0
 
-    matchs = stats["matchs_analyses"]
-    POIDS_LISSAGE = 5  # équivaut à "ajouter" 5 matchs fictifs à la moyenne
+    matchs_detail = stats.get("matchs_detail")
+    if matchs_detail:
+        marques_pond, encaisses_pond, poids_total = _stats_ponderees_depuis_detail(matchs_detail)
+    else:
+        # Repli si jamais une source ne fournit pas le détail par match
+        # (ne devrait plus arriver avec BeSoccer, gardé par sécurité).
+        poids_total = float(stats["matchs_analyses"])
+        marques_pond = float(stats["buts_marques"])
+        encaisses_pond = float(stats["buts_encaisses"])
 
-    taux_marques = (stats["buts_marques"] + POIDS_LISSAGE * MOYENNE_BUTS_LIGUE) / (matchs + POIDS_LISSAGE)
-    taux_encaisses = (stats["buts_encaisses"] + POIDS_LISSAGE * MOYENNE_BUTS_LIGUE) / (matchs + POIDS_LISSAGE)
+    taux_marques = (marques_pond + POIDS_LISSAGE * MOYENNE_BUTS_LIGUE) / (poids_total + POIDS_LISSAGE)
+    taux_encaisses = (encaisses_pond + POIDS_LISSAGE * MOYENNE_BUTS_LIGUE) / (poids_total + POIDS_LISSAGE)
 
     force_attaque = taux_marques / MOYENNE_BUTS_LIGUE
     faiblesse_defense = taux_encaisses / MOYENNE_BUTS_LIGUE
@@ -115,19 +159,48 @@ def _force_attaque_defense(stats: Optional[Dict[str, Any]]) -> Tuple[float, floa
         force_attaque *= penalite
         faiblesse_defense /= penalite
 
-    return force_attaque, faiblesse_defense
+    confiance = min(1.0, poids_total / 3.0)  # ~3 matchs pondérés pleins = confiance max
+
+    return force_attaque, faiblesse_defense, confiance
 
 
 def _poisson(k: int, lam: float) -> float:
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
 
 
+def _tau_dixon_coles(x: int, y: int, lambda_dom: float, lambda_ext: float, rho: float) -> float:
+    """
+    Correction de corrélation sur les scores bas (0-0, 1-0, 0-1, 1-1) —
+    le modèle de Poisson pur suppose les deux scores totalement
+    indépendants, ce qui n'est pas exactement vrai en football (Dixon &
+    Coles, 1997) : dans les matchs à faible score, une dynamique
+    légèrement différente s'observe. Correction standard et bien
+    documentée, appliquée UNIQUEMENT à ces 4 cases précises — le reste
+    de la grille n'est pas affecté.
+    """
+    if x == 0 and y == 0:
+        return 1 - (lambda_dom * lambda_ext * rho)
+    elif x == 0 and y == 1:
+        return 1 + (lambda_dom * rho)
+    elif x == 1 and y == 0:
+        return 1 + (lambda_ext * rho)
+    elif x == 1 and y == 1:
+        return 1 - rho
+    return 1.0
+
+
 def _grille_scores(lambda_dom: float, lambda_ext: float) -> Dict[Tuple[int, int], float]:
-    """Probabilité de chaque score exact possible (0-0, 1-0, ..., 6-6), normalisée à 1.0 au total."""
+    """
+    Probabilité de chaque score exact possible (0-0, 1-0, ..., 6-6),
+    normalisée à 1.0 au total. Inclut la correction de Dixon-Coles sur
+    les scores bas (voir _tau_dixon_coles).
+    """
     grille: Dict[Tuple[int, int], float] = {}
     for i in range(MAX_BUTS_SIMULES + 1):
         for j in range(MAX_BUTS_SIMULES + 1):
-            grille[(i, j)] = _poisson(i, lambda_dom) * _poisson(j, lambda_ext)
+            p = _poisson(i, lambda_dom) * _poisson(j, lambda_ext)
+            p *= _tau_dixon_coles(i, j, lambda_dom, lambda_ext, RHO_DIXON_COLES)
+            grille[(i, j)] = max(0.0, p)  # sécurité : jamais négatif après correction
 
     total = sum(grille.values())
     if total == 0:
@@ -241,24 +314,47 @@ def _facteur_elo(elo_equipe1: Optional[float], elo_equipe2: Optional[float]) -> 
     return 2 * part1, 2 * (1 - part1)
 
 
-def _choisir_stats_contexte(stats_globales: Optional[Dict[str, Any]], sous_bloc: str) -> Optional[Dict[str, Any]]:
+def _choisir_stats_contexte(stats_globales: Optional[Dict[str, Any]], domicile: bool) -> Optional[Dict[str, Any]]:
     """
-    Utilise les statistiques spécifiquement "à domicile" ou "à
-    l'extérieur" pour CE match précis quand elles existent (au moins 1
-    match dans ce sous-bloc), sinon retombe sur les statistiques
-    globales (mélangées) — mieux vaut une donnée générale que rien.
+    Filtre le détail match par match pour ne garder QUE les matchs à
+    domicile (ou à l'extérieur) de l'équipe pour CE match précis, si
+    suffisamment de données existent — sinon retombe sur l'ensemble des
+    matchs récents (mieux vaut une donnée générale que rien).
 
     Une équipe peut être solide à domicile et fébrile en déplacement (ou
     l'inverse) — mélanger les deux masque cet écart, pourtant fréquent
-    en football. Les indisponibilités, elles, ne sont PAS scindées
-    (une blessure compte pareil, à domicile ou à l'extérieur).
+    en football. Les indisponibilités, elles, ne sont PAS filtrées (une
+    blessure compte pareil, à domicile ou à l'extérieur).
     """
     if not stats_globales:
         return None
-    bloc = stats_globales.get(sous_bloc)
-    if bloc and bloc.get("matchs_analyses", 0) > 0:
-        return {**bloc, "indisponibles": stats_globales.get("indisponibles")}
-    return stats_globales
+
+    matchs_detail = stats_globales.get("matchs_detail") or []
+    filtres = [m for m in matchs_detail if m.get("domicile") == domicile]
+
+    if not filtres:
+        return stats_globales  # repli : pas assez de données contextuelles
+
+    return {
+        **stats_globales,
+        "matchs_detail": filtres,
+        "matchs_analyses": len(filtres),
+        "buts_marques": sum(m["buts_pour"] for m in filtres),
+        "buts_encaisses": sum(m["buts_contre"] for m in filtres),
+    }
+
+
+def _ponderer_elo_par_confiance(facteur_elo: float, confiance_forme: float) -> float:
+    """
+    Réduit l'influence de l'ELO quand on dispose déjà d'une forme récente
+    fiable (beaucoup de matchs pondérés disponibles), et la laisse
+    pleinement agir quand la forme récente est peu fiable (échantillon
+    faible) — l'ELO résume toute la saison de chaque équipe, donc plus
+    utile précisément quand les derniers matchs ne suffisent pas à eux
+    seuls à juger correctement le niveau actuel.
+    """
+    attenuation = 1 - (confiance_forme * 0.5)  # jusqu'à -50% d'effet ELO si forme très fiable
+    return 1.0 + (facteur_elo - 1.0) * attenuation
 
 
 def generer_pronostic(
@@ -274,11 +370,11 @@ def generer_pronostic(
 
     # equipe1 reçoit dans CE match -> ses stats "à domicile" si connues ;
     # equipe2 se déplace -> ses stats "à l'extérieur" si connues.
-    stats1_contexte = _choisir_stats_contexte(stats1, "domicile")
-    stats2_contexte = _choisir_stats_contexte(stats2, "exterieur")
+    stats1_contexte = _choisir_stats_contexte(stats1, domicile=True)
+    stats2_contexte = _choisir_stats_contexte(stats2, domicile=False)
 
-    force_att1, faib_def1 = _force_attaque_defense(stats1_contexte)
-    force_att2, faib_def2 = _force_attaque_defense(stats2_contexte)
+    force_att1, faib_def1, confiance1 = _force_attaque_defense(stats1_contexte)
+    force_att2, faib_def2, confiance2 = _force_attaque_defense(stats2_contexte)
 
     lambda1 = force_att1 * faib_def2 * MOYENNE_BUTS_LIGUE * AVANTAGE_DOMICILE
     lambda2 = force_att2 * faib_def1 * MOYENNE_BUTS_LIGUE
@@ -286,6 +382,13 @@ def generer_pronostic(
     elo1 = elo_confrontation.get("elo_equipe1") if elo_confrontation else None
     elo2 = elo_confrontation.get("elo_equipe2") if elo_confrontation else None
     facteur_elo1, facteur_elo2 = _facteur_elo(elo1, elo2)
+
+    # L'ELO pèse plus lourd quand la forme récente est peu fiable (peu de
+    # matchs pondérés disponibles), et moins quand elle est déjà solide.
+    confiance_moyenne = (confiance1 + confiance2) / 2
+    facteur_elo1 = _ponderer_elo_par_confiance(facteur_elo1, confiance_moyenne)
+    facteur_elo2 = _ponderer_elo_par_confiance(facteur_elo2, confiance_moyenne)
+
     lambda1 *= facteur_elo1
     lambda2 *= facteur_elo2
 

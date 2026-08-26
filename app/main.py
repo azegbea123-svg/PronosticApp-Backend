@@ -201,6 +201,15 @@ def _normaliser_telephone(telephone: str) -> str:
     return telephone.replace(" ", "").replace("+", "").strip()
 
 
+def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
+    """Le résultat que le modèle donne comme le plus probable des trois — utilisé pour le backtest."""
+    if p_v1 >= p_nul and p_v1 >= p_v2:
+        return "V1"
+    if p_v2 >= p_nul and p_v2 >= p_v1:
+        return "V2"
+    return "NUL"
+
+
 @app.post("/match/analyse", response_model=MatchAnalysisResponse, tags=["✏️ Pronostic — Actions"])
 async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.utilisateur_courant)):
     est_vip = False
@@ -591,3 +600,87 @@ async def debug_analyser_match(requete: DebugAnalyseRequest, uid: str = Depends(
     resultat["_debug_elo_confrontation"] = elo_confrontation
 
     return resultat
+
+
+class MatchBacktest(BaseModel):
+    equipe1: str
+    equipe2: str
+    typeMatch: str
+    resultatReel: str  # "V1", "NUL" ou "V2"
+
+
+class BacktestRequest(BaseModel):
+    matchs: List[MatchBacktest]
+
+
+@app.post("/debug/backtest", tags=["✏️ Admin — Actions"])
+async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Fait tourner le moteur de pronostic actuel sur une liste de matchs
+    DÉJÀ JOUÉS (avec leur vrai résultat connu), et calcule le taux de
+    réussite réel — pour mesurer objectivement la qualité du modèle
+    plutôt que de juger sur un seul cas. Réservé admin, aucun quota,
+    aucun enregistrement en base.
+    """
+    auth.exiger_admin(uid)
+
+    details = []
+    corrects_1x2 = 0
+
+    for m in requete.matchs:
+        if m.resultatReel not in ("V1", "NUL", "V2"):
+            details.append({
+                "equipe1": m.equipe1, "equipe2": m.equipe2,
+                "erreur": "resultatReel doit être 'V1', 'NUL' ou 'V2'",
+            })
+            continue
+
+        try:
+            stats1_sources, stats2_sources, elo_confrontation = await asyncio.gather(
+                _stats_toutes_sources(m.equipe1),
+                _stats_toutes_sources(m.equipe2),
+                _elo_confrontation_sure(m.equipe1, m.equipe2),
+            )
+            resultat = generer_pronostic(
+                m.equipe1, m.equipe2, m.typeMatch,
+                stats1_sources, stats2_sources,
+                elo_confrontation=elo_confrontation,
+            )
+        except Exception as e:
+            details.append({
+                "equipe1": m.equipe1, "equipe2": m.equipe2,
+                "erreur": f"{type(e).__name__}: {e}",
+            })
+            continue
+
+        predit = _resultat_predit(
+            resultat["probabiliteVictoireEquipe1"],
+            resultat["probabiliteMatchNul"],
+            resultat["probabiliteVictoireEquipe2"],
+        )
+        correct = predit == m.resultatReel
+        if correct:
+            corrects_1x2 += 1
+
+        details.append({
+            "equipe1": m.equipe1,
+            "equipe2": m.equipe2,
+            "probabilites": {
+                "V1": resultat["probabiliteVictoireEquipe1"],
+                "NUL": resultat["probabiliteMatchNul"],
+                "V2": resultat["probabiliteVictoireEquipe2"],
+            },
+            "predit": predit,
+            "resultatReel": m.resultatReel,
+            "correct": correct,
+        })
+
+    total_valides = len([d for d in details if "erreur" not in d])
+
+    return {
+        "total_matchs": len(requete.matchs),
+        "total_valides": total_valides,
+        "corrects_1x2": corrects_1x2,
+        "taux_reussite_1x2": round(corrects_1x2 / total_valides, 3) if total_valides > 0 else None,
+        "details": details,
+    }
