@@ -158,7 +158,9 @@ def _stats_ponderees_depuis_detail(matchs_detail: List[Dict[str, Any]]) -> Tuple
     return marques_pond, encaisses_pond, poids_total
 
 
-def _force_attaque_defense(stats: Optional[Dict[str, Any]]) -> Tuple[float, float, float]:
+def _force_attaque_defense(
+    stats: Optional[Dict[str, Any]], poids_lissage: float = POIDS_LISSAGE
+) -> Tuple[float, float, float]:
     """
     Renvoie (force d'attaque, faiblesse défensive, confiance) — les deux
     premiers normalisés à 1.0 = dans la moyenne, le troisième entre 0 et
@@ -176,6 +178,10 @@ def _force_attaque_defense(stats: Optional[Dict[str, Any]]) -> Tuple[float, floa
     prudence. Correction directement motivée par un cas réel remonté
     (Arsenal donné perdant face à Coventry City à cause d'un échantillon
     trop petit et non représentatif).
+
+    poids_lissage est paramétrable (défaut = POIDS_LISSAGE) uniquement
+    pour permettre au backtest de tester différentes valeurs sans jamais
+    affecter le comportement réel de l'appli pour les vrais utilisateurs.
     """
     if not stats or stats["matchs_analyses"] == 0:
         return 1.0, 1.0, 0.0
@@ -190,8 +196,8 @@ def _force_attaque_defense(stats: Optional[Dict[str, Any]]) -> Tuple[float, floa
         marques_pond = float(stats["buts_marques"])
         encaisses_pond = float(stats["buts_encaisses"])
 
-    taux_marques = (marques_pond + POIDS_LISSAGE * MOYENNE_BUTS_LIGUE) / (poids_total + POIDS_LISSAGE)
-    taux_encaisses = (encaisses_pond + POIDS_LISSAGE * MOYENNE_BUTS_LIGUE) / (poids_total + POIDS_LISSAGE)
+    taux_marques = (marques_pond + poids_lissage * MOYENNE_BUTS_LIGUE) / (poids_total + poids_lissage)
+    taux_encaisses = (encaisses_pond + poids_lissage * MOYENNE_BUTS_LIGUE) / (poids_total + poids_lissage)
 
     force_attaque = taux_marques / MOYENNE_BUTS_LIGUE
     faiblesse_defense = taux_encaisses / MOYENNE_BUTS_LIGUE
@@ -232,17 +238,23 @@ def _tau_dixon_coles(x: int, y: int, lambda_dom: float, lambda_ext: float, rho: 
     return 1.0
 
 
-def _grille_scores(lambda_dom: float, lambda_ext: float) -> Dict[Tuple[int, int], float]:
+def _grille_scores(
+    lambda_dom: float, lambda_ext: float, rho: float = RHO_DIXON_COLES
+) -> Dict[Tuple[int, int], float]:
     """
     Probabilité de chaque score exact possible (0-0, 1-0, ..., 6-6),
     normalisée à 1.0 au total. Inclut la correction de Dixon-Coles sur
     les scores bas (voir _tau_dixon_coles).
+
+    rho est paramétrable (défaut = RHO_DIXON_COLES) uniquement pour
+    permettre au backtest de tester différentes valeurs sans jamais
+    affecter le comportement réel de l'appli pour les vrais utilisateurs.
     """
     grille: Dict[Tuple[int, int], float] = {}
     for i in range(MAX_BUTS_SIMULES + 1):
         for j in range(MAX_BUTS_SIMULES + 1):
             p = _poisson(i, lambda_dom) * _poisson(j, lambda_ext)
-            p *= _tau_dixon_coles(i, j, lambda_dom, lambda_ext, RHO_DIXON_COLES)
+            p *= _tau_dixon_coles(i, j, lambda_dom, lambda_ext, rho)
             grille[(i, j)] = max(0.0, p)  # sécurité : jamais négatif après correction
 
     total = sum(grille.values())
@@ -407,7 +419,15 @@ def generer_pronostic(
     stats1_sources: List[Dict[str, Any]],
     stats2_sources: List[Dict[str, Any]],
     elo_confrontation: Optional[Dict[str, Any]] = None,
+    rho_dixon_coles: float = RHO_DIXON_COLES,
+    poids_lissage: float = POIDS_LISSAGE,
 ) -> Dict[str, Any]:
+    """
+    rho_dixon_coles et poids_lissage sont paramétrables uniquement pour
+    permettre au backtest de tester différents réglages sans jamais
+    affecter /match/analyse pour les vrais utilisateurs (qui appelle
+    toujours cette fonction avec les valeurs par défaut).
+    """
     stats1 = _fusionner_stats(stats1_sources)
     stats2 = _fusionner_stats(stats2_sources)
 
@@ -419,8 +439,8 @@ def generer_pronostic(
     stats1_contexte = _choisir_stats_contexte(stats1, domicile=True)
     stats2_contexte = _choisir_stats_contexte(stats2, domicile=False)
 
-    force_att1, faib_def1, confiance1 = _force_attaque_defense(stats1_contexte)
-    force_att2, faib_def2, confiance2 = _force_attaque_defense(stats2_contexte)
+    force_att1, faib_def1, confiance1 = _force_attaque_defense(stats1_contexte, poids_lissage)
+    force_att2, faib_def2, confiance2 = _force_attaque_defense(stats2_contexte, poids_lissage)
 
     # Confiance plafonnée selon la catégorie détectée (ex: un amical ne
     # peut jamais atteindre une confiance de 1.0, même avec 5 matchs
@@ -445,7 +465,7 @@ def generer_pronostic(
     lambda1 *= facteur_elo1
     lambda2 *= facteur_elo2
 
-    grille = _grille_scores(lambda1, lambda2)
+    grille = _grille_scores(lambda1, lambda2, rho_dixon_coles)
     p1, p_nul, p2 = _probabilites_1x2(grille)
     marches = _marches_supplementaires(grille)
 

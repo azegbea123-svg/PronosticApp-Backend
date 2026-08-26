@@ -611,6 +611,8 @@ class MatchBacktest(BaseModel):
 
 class BacktestRequest(BaseModel):
     matchs: List[MatchBacktest]
+    rho_dixon_coles: Optional[float] = None
+    poids_lissage: Optional[float] = None
 
 
 @app.post("/debug/backtest", tags=["✏️ Admin — Actions"])
@@ -628,8 +630,18 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
     le temps total risque quand même de dépasser le délai maximal d'une
     requête HTTP (502) : mieux vaut découper un très gros fichier en
     plusieurs appels séparés plutôt que tout envoyer d'un coup.
+
+    rho_dixon_coles et poids_lissage sont optionnels : si fournis, ils
+    remplacent les valeurs par défaut UNIQUEMENT pour ce backtest — sans
+    jamais affecter /match/analyse pour les vrais utilisateurs. Pratique
+    pour comparer objectivement plusieurs réglages sur le même jeu de
+    matchs déjà validés.
     """
     auth.exiger_admin(uid)
+
+    from .analysis import RHO_DIXON_COLES, POIDS_LISSAGE
+    rho = requete.rho_dixon_coles if requete.rho_dixon_coles is not None else RHO_DIXON_COLES
+    lissage = requete.poids_lissage if requete.poids_lissage is not None else POIDS_LISSAGE
 
     details = []
     corrects_1x2 = 0
@@ -650,6 +662,8 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
                 m.equipe1, m.equipe2, m.typeMatch,
                 stats1_sources, stats2_sources,
                 elo_confrontation=elo_confrontation,
+                rho_dixon_coles=rho,
+                poids_lissage=lissage,
             )
         except Exception as e:
             return {
@@ -687,6 +701,7 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
     total_valides = len([d for d in details if "erreur" not in d])
 
     return {
+        "parametres_utilises": {"rho_dixon_coles": rho, "poids_lissage": lissage},
         "total_matchs": len(requete.matchs),
         "total_valides": total_valides,
         "corrects_1x2": corrects_1x2,
