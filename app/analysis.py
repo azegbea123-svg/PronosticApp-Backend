@@ -321,7 +321,7 @@ def _facteur_contexte_domicile_exterieur(
 
 def _facteurs(nom: str, stats: Optional[Dict[str, Any]]) -> List[str]:
     if not stats:
-        return [f"Aucune donnée récente trouvée pour {nom} (sources indisponibles)"]
+        return []
 
     facteurs: List[str] = []
     for source, forme in stats["formes_par_source"]:
@@ -557,14 +557,7 @@ def generer_pronostic(
     else:
         favori = None
 
-    if not stats1 and not stats2:
-        resume = (
-            f"Aucune statistique récente n'a pu être récupérée pour {equipe1} ou {equipe2} "
-            f"(vérifie l'orthographe, ou les sources sont temporairement indisponibles). "
-            f"Le pronostic ci-dessus repose uniquement sur l'avantage du terrain et doit être "
-            f"pris avec beaucoup de prudence."
-        )
-    elif favori:
+    if favori:
         resume = (
             f"{favori} part favori pour ce {type_match} (buts attendus : "
             f"{lambda1:.1f} - {lambda2:.1f}). Les facteurs clés ci-dessous méritent "

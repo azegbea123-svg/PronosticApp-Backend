@@ -67,27 +67,89 @@ def _slugify(texte: str) -> str:
     return re.sub(r"\s+", "-", texte_propre)
 
 
+# Équivalences fréquentes entre l'anglais et l'usage interne BeSoccer
+# (souvent hispanisant à l'origine). Remplacement sur des MOTS ENTIERS
+# uniquement (limites de mot strictes) — sans ça, "st" matche à
+# l'intérieur de "castilla", "ii" à l'intérieur d'autres mots, etc.
+_EQUIVALENCES = [
+    ("united", "utd"),
+    ("saint", "st"),
+]
+
+
+def _remplacer_mot_entier(texte: str, mot: str, remplacement: str) -> str:
+    return re.sub(rf"\b{re.escape(mot)}\b", remplacement, texte)
+
+
 def _candidats_slug(nom_equipe: str) -> List[str]:
-    """Génère plusieurs variantes de slug à essayer, de la plus probable à la moins probable."""
+    """
+    Génère un large éventail de variantes de slug à essayer, de la plus
+    probable à la moins probable — volontairement exhaustif : BeSoccer
+    n'offre pas de moteur de recherche fiable, donc plus on teste de
+    variantes plausibles avant d'abandonner, moins on rate d'équipes qui
+    existent réellement sur BeSoccer mais sous un slug inattendu.
+    """
     candidats: List[str] = []
 
-    # Les correspondances connues passent en premier — plus fiables
-    # qu'une règle générique puisque vérifiées manuellement.
+    def _ajouter(candidat: str) -> None:
+        if candidat and candidat not in candidats:
+            candidats.append(candidat)
+
     nom_sans_accents = "".join(
         c for c in unicodedata.normalize("NFKD", nom_equipe.lower()) if not unicodedata.combining(c)
     )
+
+    # 1. Correspondances connues, vérifiées manuellement — toujours en premier.
     for mot_cle, slug_connu in _SLUGS_CONNUS.items():
-        if mot_cle in nom_sans_accents and slug_connu not in candidats:
-            candidats.append(slug_connu)
+        if mot_cle in nom_sans_accents:
+            _ajouter(slug_connu)
 
-    candidats.append(_slugify(nom_equipe))
+    # 2. Slug direct, tel quel.
+    _ajouter(_slugify(nom_equipe))
 
+    # 3. Sans les tokens génériques (FC, CF, AFC, CD, SD, UD, RC, AC, CA, "de", "club").
     mots = nom_equipe.split()
     mots_filtres = [m for m in mots if m.lower() not in _TOKENS_A_RETIRER]
     if mots_filtres and len(mots_filtres) != len(mots):
-        candidat_filtre = _slugify(" ".join(mots_filtres))
-        if candidat_filtre not in candidats:
-            candidats.append(candidat_filtre)
+        _ajouter(_slugify(" ".join(mots_filtres)))
+
+    # 4. Sans espaces ni tirets du tout (certains clubs composés sont
+    # collés en un seul mot sur BeSoccer).
+    _ajouter(_slugify(nom_equipe).replace("-", ""))
+
+    # 5. Seulement le premier ou le dernier mot significatif (utile pour
+    # les équipes très souvent désignées par un seul mot dans l'usage
+    # courant, ex: "Barcelona" plutôt que le nom complet). Filtré sur une
+    # longueur minimale : un mot trop court/générique ("ii", "cp", "sc")
+    # risquerait de matcher la page BeSoccer d'une TOUT AUTRE équipe —
+    # un faux positif silencieux serait pire que pas de données du tout.
+    if mots_filtres and len(mots_filtres) > 1:
+        for mot in (mots_filtres[-1], mots_filtres[0]):
+            if len(mot) >= 4:
+                _ajouter(_slugify(mot))
+
+    # 6. Équivalences lexicales connues (mots entiers uniquement, dans
+    # les deux sens), appliquées sur le nom déjà nettoyé des tokens
+    # génériques.
+    base = " ".join(mots_filtres) if mots_filtres else nom_equipe
+    base_minuscule = base.lower()
+    for terme_a, terme_b in _EQUIVALENCES:
+        variante_a = _remplacer_mot_entier(base_minuscule, terme_a, terme_b)
+        if variante_a != base_minuscule:
+            _ajouter(_slugify(variante_a))
+        variante_b = _remplacer_mot_entier(base_minuscule, terme_b, terme_a)
+        if variante_b != base_minuscule:
+            _ajouter(_slugify(variante_b))
+
+    # 7. Variante "espoirs"/"réserve" fréquente sur BeSoccer : équipe B /
+    # équipe II souvent notée avec un tiret ("-b", "-ii") même quand le
+    # nom saisi utilise un espace, et l'inverse (II <-> B).
+    for suffixe, alternative in ((" ii", "-b"), (" b", "-ii")):
+        if base_minuscule.endswith(suffixe):
+            racine = _slugify(base_minuscule[: -len(suffixe)].strip())
+            suffixe_propre = suffixe.strip()  # "ii" ou "b"
+            _ajouter(f"{racine}-{suffixe_propre}")
+            _ajouter(f"{racine}{alternative}")
 
     return candidats
 
@@ -275,19 +337,32 @@ def _extraire_indisponibles(html: str) -> Optional[int]:
 
 
 async def get_team_stats(nom_equipe: str) -> Optional[Dict[str, Any]]:
-    """Point d'entrée utilisé par le reste de l'app. Renvoie None si indisponible."""
+    """
+    Point d'entrée utilisé par le reste de l'app. Renvoie None si
+    vraiment aucune variante de slug ne donne de données exploitables.
+
+    ⚠️ Essaie TOUTES les variantes de slug candidates avant d'abandonner
+    — pas seulement jusqu'à la première page qui répond HTTP 200. Une
+    page peut exister (bon slug, statut 200) mais ne rien donner
+    d'exploitable (structure différente, page vide, saison sans matchs
+    récents...) ; dans ce cas, une autre variante de slug peut mener à
+    la VRAIE bonne page. S'arrêter au premier 200 sans vérifier que
+    l'extraction réussit faisait rater des équipes qui existaient
+    pourtant bien sur BeSoccer sous un autre slug (cas réel : Celta Vigo).
+    """
     async with httpx.AsyncClient() as client:
-        trouve = await _trouver_page_equipe(client, nom_equipe)
-        if not trouve:
-            return None
-        html, slug = trouve
-        stats = _extraire_forme_recente(html, slug)
-        if stats is None:
-            return None
-        stats["source"] = "BeSoccer"
-        stats["indisponibles"] = _extraire_indisponibles(html)
-        stats["slug"] = slug
-        return stats
+        for slug in _candidats_slug(nom_equipe):
+            html = await _get_html(client, TEAM_URL.format(slug=slug))
+            if not html:
+                continue
+            stats = _extraire_forme_recente(html, slug)
+            if stats is None:
+                continue
+            stats["source"] = "BeSoccer"
+            stats["indisponibles"] = _extraire_indisponibles(html)
+            stats["slug"] = slug
+            return stats
+    return None
 
 
 ANALYSIS_URL = "https://www.besoccer.com/match/{slug1}/{slug2}/{match_id}/analysis"

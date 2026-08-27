@@ -112,7 +112,14 @@ async def debug_verifier_clubs(noms: List[str], uid: str = Depends(auth.utilisat
 
 @app.get("/debug/besoccer", tags=["📖 Admin — Diagnostic"])
 async def debug_besoccer(equipe: str, uid: str = Depends(auth.utilisateur_courant)):
-    """🔧 Diagnostic (admin), adapté à la version basée sur les slugs d'équipe."""
+    """
+    🔧 Diagnostic (admin) — montre TOUTES les variantes de slug essayées,
+    y compris celles qui répondent HTTP 200 mais dont l'extraction
+    échoue (page trouvée mais rien d'exploitable dessus). Reflète
+    exactement le comportement réel de get_team_stats depuis la
+    correction du bug "premier 200 = arrêt", qui faisait parfois rater
+    la bonne page pour certaines équipes (cas réel : Celta Vigo).
+    """
     auth.exiger_admin(uid)
     import httpx
     from .sources.besoccer import _candidats_slug, TEAM_URL, HEADERS, _extraire_forme_recente
@@ -131,9 +138,12 @@ async def debug_besoccer(equipe: str, uid: str = Depends(auth.utilisateur_couran
                 essai: Dict[str, Any] = {"url": url, "status_code": r.status_code}
                 if r.status_code == 200:
                     stats = _extraire_forme_recente(r.text, slug)
+                    essai["extraction_reussie"] = stats is not None
                     essai["stats_extraites"] = stats
                     resultat["essais"].append(essai)
-                    break
+                    if stats is not None:
+                        break  # c'est cette page qui sera réellement utilisée par l'appli
+                    continue  # 200 mais rien d'exploitable -> on essaie le candidat suivant
                 resultat["essais"].append(essai)
             except Exception as e:
                 resultat["essais"].append({"url": url, "erreur": f"{type(e).__name__}: {e}"})
