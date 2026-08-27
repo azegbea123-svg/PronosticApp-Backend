@@ -189,12 +189,14 @@ def _jours_moyens_entre_matchs_locale(matchs_detail: List[Dict[str, Any]]) -> Op
 
 def _force_attaque_defense(
     stats: Optional[Dict[str, Any]], poids_lissage: float = POIDS_LISSAGE
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, Optional[Dict[str, Any]]]:
     """
-    Renvoie (force d'attaque, faiblesse défensive, confiance) — les deux
-    premiers normalisés à 1.0 = dans la moyenne, le troisième entre 0 et
-    1 reflétant la fiabilité de l'échantillon (peu de matchs récents
-    pondérés = confiance faible, utilisé ensuite pour doser l'ELO).
+    Renvoie (force d'attaque, faiblesse défensive, confiance, info_fatigue)
+    — les deux premiers normalisés à 1.0 = dans la moyenne, le troisième
+    entre 0 et 1 reflétant la fiabilité de l'échantillon (peu de matchs
+    récents pondérés = confiance faible, utilisé ensuite pour doser
+    l'ELO), le quatrième un dict {jours_moyens, penalite_pourcent} si une
+    pénalité de fatigue a été appliquée, sinon None.
 
     ⚠️ Lissage statistique appliqué (shrinkage) : sur un petit échantillon
     pondéré, un taux brut peut être extrême par pur hasard — ex: une
@@ -213,7 +215,7 @@ def _force_attaque_defense(
     affecter le comportement réel de l'appli pour les vrais utilisateurs.
     """
     if not stats or stats["matchs_analyses"] == 0:
-        return 1.0, 1.0, 0.0
+        return 1.0, 1.0, 0.0, None
 
     matchs_detail = stats.get("matchs_detail")
     if matchs_detail:
@@ -244,8 +246,9 @@ def _force_attaque_defense(
     # matchs, pas sur le sous-ensemble pertinent pour CE match précis.
     # Dégressif linéairement entre les deux seuils. Reste silencieusement
     # inactif si la date n'a pas pu être extraite (voir
-    # _parser_jour_approximatif côté besoccer.py — signal encore à
-    # confirmer sur de vraies données).
+    # _parser_jour_approximatif côté besoccer.py — confirmé fiable sur
+    # de vraies données depuis).
+    info_fatigue = None
     jours_repos = _jours_moyens_entre_matchs_locale(matchs_detail) if matchs_detail else None
     if jours_repos is not None and jours_repos < SEUIL_JOURS_REPOS_CONFORTABLE:
         avancement = (SEUIL_JOURS_REPOS_CONFORTABLE - jours_repos) / (
@@ -255,10 +258,14 @@ def _force_attaque_defense(
         penalite_fatigue = 1 - avancement * (1 - PENALITE_MIN_FATIGUE)
         force_attaque *= penalite_fatigue
         faiblesse_defense /= penalite_fatigue
+        info_fatigue = {
+            "jours_moyens_entre_matchs": round(jours_repos, 1),
+            "penalite_pourcent": round((1 - penalite_fatigue) * 100, 1),
+        }
 
     confiance = min(1.0, poids_total / 3.0)  # ~3 matchs pondérés pleins = confiance max
 
-    return force_attaque, faiblesse_defense, confiance
+    return force_attaque, faiblesse_defense, confiance, info_fatigue
 
 
 def _poisson(k: int, lam: float) -> float:
@@ -574,8 +581,8 @@ def generer_pronostic(
     stats1_contexte = _choisir_stats_contexte(stats1, domicile=True)
     stats2_contexte = _choisir_stats_contexte(stats2, domicile=False)
 
-    force_att1, faib_def1, confiance1 = _force_attaque_defense(stats1_contexte, poids_lissage)
-    force_att2, faib_def2, confiance2 = _force_attaque_defense(stats2_contexte, poids_lissage)
+    force_att1, faib_def1, confiance1, fatigue1 = _force_attaque_defense(stats1_contexte, poids_lissage)
+    force_att2, faib_def2, confiance2, fatigue2 = _force_attaque_defense(stats2_contexte, poids_lissage)
 
     # Confiance plafonnée selon la catégorie détectée (ex: un amical ne
     # peut jamais atteindre une confiance de 1.0, même avec 5 matchs
@@ -605,6 +612,12 @@ def generer_pronostic(
     marches = _marches_supplementaires(grille)
 
     facteurs = _facteurs(equipe1, stats1) + _facteurs(equipe2, stats2)
+    for nom, fatigue in ((equipe1, fatigue1), (equipe2, fatigue2)):
+        if fatigue:
+            facteurs.append(
+                f"{nom} — calendrier chargé (match tous les {fatigue['jours_moyens_entre_matchs']} jours "
+                f"en moyenne récemment), pénalité de fatigue appliquée : -{fatigue['penalite_pourcent']}%"
+            )
     confrontation = _confrontation_recente(equipe1, stats1, equipe2, stats2)
     if confrontation:
         facteurs.append(confrontation)
