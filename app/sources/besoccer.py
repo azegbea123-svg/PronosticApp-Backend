@@ -21,6 +21,7 @@ avant d'abandonner.
 """
 
 import re
+import time
 import unicodedata
 from typing import Optional, Dict, Any, List
 import httpx
@@ -42,6 +43,41 @@ HEADERS = {
 }
 
 TEAM_URL = "https://www.besoccer.com/team/{slug}"
+
+# ==== Cache mémoire simple ====
+#
+# ⚠️ En mémoire du processus (pas Redis/DB) — se vide à chaque redémarrage
+# du serveur (fréquent sur le plan gratuit Render, qui s'endort après
+# inactivité). Suffisant pour l'objectif visé : éviter de refaire toute
+# la recherche de slug (jusqu'à 9 requêtes HTTP) à chaque fois que le
+# MÊME utilisateur redemande un pronostic sur la même équipe dans la
+# même session, ou pendant un backtest qui répète souvent les mêmes
+# équipes. Pas conçu pour survivre entre déploiements.
+_CACHE_STATS: Dict[str, tuple] = {}  # nom normalisé -> (valeur, expire_a)
+_CACHE_ABSENT = object()  # sentinelle distincte de None (None = "confirmé aucune donnée")
+
+_TTL_SUCCES_SECONDES = 6 * 3600  # 6h : la forme récente d'une équipe ne change pas d'heure en heure
+_TTL_ECHEC_SECONDES = 1 * 3600  # 1h : plus court, pour ne pas bloquer trop longtemps un vrai correctif (ex: ajout dans _SLUGS_CONNUS)
+
+
+def _cache_cle(nom_equipe: str) -> str:
+    return nom_equipe.strip().lower()
+
+
+def _cache_lire(nom_equipe: str):
+    entree = _CACHE_STATS.get(_cache_cle(nom_equipe))
+    if entree is None:
+        return _CACHE_ABSENT
+    valeur, expire_a = entree
+    if time.time() >= expire_a:
+        return _CACHE_ABSENT
+    return valeur
+
+
+def _cache_ecrire(nom_equipe: str, valeur: Optional[Dict[str, Any]]) -> None:
+    ttl = _TTL_SUCCES_SECONDES if valeur is not None else _TTL_ECHEC_SECONDES
+    _CACHE_STATS[_cache_cle(nom_equipe)] = (valeur, time.time() + ttl)
+
 
 # Tokens fréquemment absents du slug BeSoccer (préfixes/mots de liaison
 # courants dans les noms de clubs) — retirés pour générer des variantes.
@@ -173,6 +209,73 @@ async def _trouver_page_equipe(client: httpx.AsyncClient, nom_equipe: str) -> Op
     return None
 
 
+_MOIS_ABBR = {
+    "jan": 1, "feb": 2, "fev": 2, "mar": 3, "apr": 4, "avr": 4, "may": 5, "mai": 5,
+    "jun": 6, "jui": 6, "jul": 7, "aug": 8, "aou": 8, "sep": 9, "oct": 10,
+    "nov": 11, "dec": 12,
+}
+_JOURS_CUMULES_AVANT_MOIS = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+
+
+def _parser_jour_approximatif(texte: str) -> Optional[int]:
+    """
+    Cherche une date du type "16 Aug." ou "3 Sep" dans le texte d'un lien
+    de match, et renvoie un jour-de-l'année approximatif (1-365, sans
+    tenir compte des années bissextiles — précision suffisante pour
+    comparer des écarts de quelques jours entre deux matchs).
+
+    ⚠️ Format non vérifié sur une vraie page BeSoccer (mon environnement
+    ne peut pas y accéder directement) — à confirmer via /debug/besoccer
+    avant de faire confiance à ce signal. Si le format réel diffère,
+    cette fonction renverra simplement None partout, sans rien casser
+    (le signal de fatigue sera juste silencieusement inactif).
+    """
+    m = re.search(r"\b(\d{1,2})\s+([A-Za-zÀ-ÿ]{3,})\.?\b", texte)
+    if not m:
+        return None
+    jour = int(m.group(1))
+    mois_abbr = m.group(2)[:3].lower()
+    mois = _MOIS_ABBR.get(mois_abbr)
+    if mois is None or not (1 <= jour <= 31):
+        return None
+    return _JOURS_CUMULES_AVANT_MOIS[mois - 1] + jour
+
+
+def _jours_moyens_entre_matchs(matchs_detail: List[Dict[str, Any]]) -> Optional[float]:
+    """
+    Écart moyen (en jours) entre les matchs listés, du plus récent au
+    plus ancien. Sert de signal de "congestion du calendrier" — une
+    équipe qui enchaîne les matchs tous les 3 jours est généralement
+    plus sujette à la fatigue qu'une équipe qui en joue un tous les 7-10
+    jours.
+
+    Renvoie None si moins de 2 dates exploitables (rien à comparer), ou
+    si le format de date n'a pas pu être reconnu par
+    _parser_jour_approximatif (voir sa docstring — non vérifié sur une
+    vraie page BeSoccer).
+
+    Gère le passage d'une année à l'autre de façon approximative : si un
+    match plus ancien semble "après" dans l'année civile un match plus
+    récent (ex: match récent en janvier, précédent en décembre), on
+    ajoute 365 jours pour obtenir un écart positif cohérent.
+    """
+    jours = [m["jour_annee_approx"] for m in matchs_detail if m.get("jour_annee_approx") is not None]
+    if len(jours) < 2:
+        return None
+
+    ecarts = []
+    for plus_recent, plus_ancien in zip(jours, jours[1:]):
+        ecart = plus_recent - plus_ancien
+        if ecart < 0:
+            ecart += 365  # passage d'année
+        if ecart > 0:  # ignore les doublons/dates identiques (rien à en tirer)
+            ecarts.append(ecart)
+
+    if not ecarts:
+        return None
+    return sum(ecarts) / len(ecarts)
+
+
 def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional[Dict[str, Any]]:
     """
     Parcourt tous les liens /match/... de la page et identifie ceux qui
@@ -262,6 +365,7 @@ def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional
                 "buts_contre": score_adverse,
                 "domicile": etait_domicile,  # None si format d'URL inattendu
                 "adversaire_slug": adversaire_slug,
+                "jour_annee_approx": _parser_jour_approximatif(texte_complet),  # None si non reconnu
             }
         )
 
@@ -284,6 +388,7 @@ def _extraire_forme_recente(html: str, slug_equipe: str, n: int = 5) -> Optional
         "buts_encaisses": buts_encaisses,
         "matchs_analyses": len(resultats),
         "matchs_detail": matchs_detail,  # plus récent en premier
+        "jours_moyens_entre_matchs": _jours_moyens_entre_matchs(matchs_detail),  # None si dates non exploitables
     }
 
     if dom_matchs > 0:
@@ -349,7 +454,24 @@ async def get_team_stats(nom_equipe: str) -> Optional[Dict[str, Any]]:
     la VRAIE bonne page. S'arrêter au premier 200 sans vérifier que
     l'extraction réussit faisait rater des équipes qui existaient
     pourtant bien sur BeSoccer sous un autre slug (cas réel : Celta Vigo).
+
+    ⚠️ Mis en cache en mémoire (voir _CACHE_STATS ci-dessous) — la
+    recherche élargie (jusqu'à 9 variantes de slug) fait grimper le
+    nombre de requêtes BeSoccer par équipe ; sans cache, chaque
+    pronostic redemandé refait toute la recherche depuis zéro, ce qui
+    ralentit l'appli et rapproche du seuil qui avait déjà causé un
+    blocage BeSoccer lors d'un backtest précédent.
     """
+    resultat = await _get_team_stats_sans_cache(nom_equipe)
+    _cache_ecrire(nom_equipe, resultat)
+    return resultat
+
+
+async def _get_team_stats_sans_cache(nom_equipe: str) -> Optional[Dict[str, Any]]:
+    en_cache = _cache_lire(nom_equipe)
+    if en_cache is not _CACHE_ABSENT:
+        return en_cache
+
     async with httpx.AsyncClient() as client:
         for slug in _candidats_slug(nom_equipe):
             html = await _get_html(client, TEAM_URL.format(slug=slug))

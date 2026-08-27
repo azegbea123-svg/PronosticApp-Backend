@@ -29,6 +29,9 @@ MOYENNE_BUTS_LIGUE = 1.35   # buts marqués par équipe et par match, moyenne g�
 AVANTAGE_DOMICILE = 1.15    # multiplicateur "championnat" par défaut — voir CATEGORIES_MATCH pour les autres
 MAX_BUTS_SIMULES = 6        # borne de la grille de scores simulés (au-delà, probabilité négligeable)
 PENALITE_MIN_INDISPONIBLES = 0.70  # plancher : -30% de force max, même avec beaucoup d'absents
+SEUIL_JOURS_REPOS_CONFORTABLE = 6.0  # au-delà, aucune pénalité de fatigue
+SEUIL_JOURS_REPOS_CRITIQUE = 3.0  # en-dessous, pénalité maximale
+PENALITE_MIN_FATIGUE = 0.90  # plancher : -10% de force max en cas de calendrier très chargé — volontairement modeste tant que le signal n'est pas confirmé sur de vraies données (voir _parser_jour_approximatif)
 POIDS_DECROISSANCE_ANCIENNETE = 0.85  # chaque match plus ancien pèse 15% de moins que le précédent
 POIDS_LISSAGE = 3  # ajusté empiriquement (voir backtest) — ⚠️ optimisé sur le même échantillon que testé, pas une validation indépendante ; réduit aussi une partie de la protection contre les petits échantillons extrêmes (cas Arsenal/Coventry) qui avait motivé la valeur initiale de 5
 RHO_DIXON_COLES = -0.20  # ajusté empiriquement (voir backtest) — meilleure précision sur les nuls que -0.10
@@ -128,6 +131,7 @@ def _fusionner_stats(stats_sources: List[Dict[str, Any]]) -> Optional[Dict[str, 
         "buts_encaisses": buts_encaisses,
         "indisponibles": indisponibles,
         "sources": [s.get("source", "source inconnue") for s in stats_sources],
+        "slugs": [s["slug"] for s in stats_sources if s.get("slug")],
         "formes_par_source": [
             (s.get("source", "?"), s.get("forme", [])) for s in stats_sources if s.get("forme")
         ],
@@ -158,6 +162,29 @@ def _stats_ponderees_depuis_detail(matchs_detail: List[Dict[str, Any]]) -> Tuple
         encaisses_pond += m["buts_contre"] * poids
         poids_total += poids
     return marques_pond, encaisses_pond, poids_total
+
+
+def _jours_moyens_entre_matchs_locale(matchs_detail: List[Dict[str, Any]]) -> Optional[float]:
+    """
+    Version locale à analysis.py du calcul de congestion du calendrier
+    (voir besoccer._jours_moyens_entre_matchs pour la logique détaillée
+    et les mêmes réserves sur la fiabilité du parsing de date) — dupliquée
+    ici plutôt qu'importée pour que analysis.py reste indépendant d'une
+    source de données précise (il ne connaît que des dicts génériques).
+    """
+    jours = [m["jour_annee_approx"] for m in matchs_detail if m.get("jour_annee_approx") is not None]
+    if len(jours) < 2:
+        return None
+    ecarts = []
+    for plus_recent, plus_ancien in zip(jours, jours[1:]):
+        ecart = plus_recent - plus_ancien
+        if ecart < 0:
+            ecart += 365
+        if ecart > 0:
+            ecarts.append(ecart)
+    if not ecarts:
+        return None
+    return sum(ecarts) / len(ecarts)
 
 
 def _force_attaque_defense(
@@ -209,6 +236,25 @@ def _force_attaque_defense(
         penalite = max(PENALITE_MIN_INDISPONIBLES, 1 - 0.03 * indisponibles)
         force_attaque *= penalite
         faiblesse_defense /= penalite
+
+    # Pénalité de fatigue si le calendrier récent est chargé (peu de
+    # jours entre les matchs). Recalculée ici depuis matchs_detail
+    # (déjà filtré domicile/extérieur à ce stade) plutôt que lue depuis
+    # un champ pré-calculé — sinon le nombre porterait sur l'ensemble des
+    # matchs, pas sur le sous-ensemble pertinent pour CE match précis.
+    # Dégressif linéairement entre les deux seuils. Reste silencieusement
+    # inactif si la date n'a pas pu être extraite (voir
+    # _parser_jour_approximatif côté besoccer.py — signal encore à
+    # confirmer sur de vraies données).
+    jours_repos = _jours_moyens_entre_matchs_locale(matchs_detail) if matchs_detail else None
+    if jours_repos is not None and jours_repos < SEUIL_JOURS_REPOS_CONFORTABLE:
+        avancement = (SEUIL_JOURS_REPOS_CONFORTABLE - jours_repos) / (
+            SEUIL_JOURS_REPOS_CONFORTABLE - SEUIL_JOURS_REPOS_CRITIQUE
+        )
+        avancement = min(1.0, max(0.0, avancement))
+        penalite_fatigue = 1 - avancement * (1 - PENALITE_MIN_FATIGUE)
+        force_attaque *= penalite_fatigue
+        faiblesse_defense /= penalite_fatigue
 
     confiance = min(1.0, poids_total / 3.0)  # ~3 matchs pondérés pleins = confiance max
 
@@ -317,6 +363,39 @@ def _facteur_contexte_domicile_exterieur(
         f"encaissés sur ses {stats_utilisees['matchs_analyses']} derniers matchs {label} uniquement "
         f"(plus précis que ses stats générales)"
     )
+
+
+def _confrontation_recente(equipe1: str, stats1: Optional[Dict[str, Any]], equipe2: str, stats2: Optional[Dict[str, Any]]) -> Optional[str]:
+    """
+    Cherche si les deux équipes se sont affrontées parmi les quelques
+    derniers matchs déjà récupérés pour l'une OU l'autre (pas une
+    recherche dédiée — juste un coup d'œil dans des données qu'on a de
+    toute façon déjà sous la main).
+
+    ⚠️ Ce n'est PAS un historique complet des confrontations directes —
+    seulement une fenêtre de quelques matchs récents par équipe. Si les
+    deux équipes ne se sont pas rencontrées dans cette fenêtre, ça ne
+    veut pas dire qu'elles n'ont jamais joué l'une contre l'autre,
+    seulement qu'on n'a pas l'info sous la main sans requête dédiée.
+
+    Renvoie une phrase informative si un match commun est trouvé, sinon
+    None (n'affecte jamais le calcul des probabilités — un seul match ne
+    doit pas biaiser le modèle, ceci est purement informatif pour
+    l'utilisateur).
+    """
+    if not stats1 or not stats2:
+        return None
+
+    slugs2 = set(stats2.get("slugs", []))
+    for m in stats1.get("matchs_detail", []):
+        if m.get("adversaire_slug") and m["adversaire_slug"] in slugs2:
+            if m.get("domicile") is True:
+                return f"Confrontation directe récente : {equipe1} {m['buts_pour']}-{m['buts_contre']} {equipe2}"
+            elif m.get("domicile") is False:
+                return f"Confrontation directe récente : {equipe2} {m['buts_contre']}-{m['buts_pour']} {equipe1}"
+            return f"Confrontation directe récente trouvée : score {m['buts_pour']}-{m['buts_contre']} (sens non déterminé)"
+
+    return None
 
 
 def _facteurs(nom: str, stats: Optional[Dict[str, Any]]) -> List[str]:
@@ -526,6 +605,9 @@ def generer_pronostic(
     marches = _marches_supplementaires(grille)
 
     facteurs = _facteurs(equipe1, stats1) + _facteurs(equipe2, stats2)
+    confrontation = _confrontation_recente(equipe1, stats1, equipe2, stats2)
+    if confrontation:
+        facteurs.append(confrontation)
 
     facteur_dom = _facteur_contexte_domicile_exterieur(equipe1, stats1, stats1_contexte, "à domicile")
     if facteur_dom:
