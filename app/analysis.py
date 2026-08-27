@@ -32,6 +32,8 @@ PENALITE_MIN_INDISPONIBLES = 0.70  # plancher : -30% de force max, même avec be
 POIDS_DECROISSANCE_ANCIENNETE = 0.85  # chaque match plus ancien pèse 15% de moins que le précédent
 POIDS_LISSAGE = 3  # ajusté empiriquement (voir backtest) — ⚠️ optimisé sur le même échantillon que testé, pas une validation indépendante ; réduit aussi une partie de la protection contre les petits échantillons extrêmes (cas Arsenal/Coventry) qui avait motivé la valeur initiale de 5
 RHO_DIXON_COLES = -0.20  # ajusté empiriquement (voir backtest) — meilleure précision sur les nuls que -0.10
+DIVISEUR_ECHELLE_ELO = 30  # ~73/27 pour un écart de 13 points, ~81/19 pour 19 points — jamais testé empiriquement au-delà de 2-3 cas manuels
+COEFFICIENT_ATTENUATION_ELO = 0.5  # jusqu'à -50% d'effet ELO si forme récente très fiable — choisi arbitrairement, jamais testé
 
 # ⚠️ Catégorisation du type de match — jusqu'ici `type_match` ne servait
 # qu'à écrire une phrase dans le résumé, sans influencer le calcul. Ce
@@ -339,7 +341,9 @@ def _facteurs(nom: str, stats: Optional[Dict[str, Any]]) -> List[str]:
     return facteurs
 
 
-def _facteur_elo(elo_equipe1: Optional[float], elo_equipe2: Optional[float]) -> Tuple[float, float]:
+def _facteur_elo(
+    elo_equipe1: Optional[float], elo_equipe2: Optional[float], diviseur_echelle: float = DIVISEUR_ECHELLE_ELO
+) -> Tuple[float, float]:
     """
     Convertit un écart d'ELO en multiplicateurs à appliquer aux buts
     attendus de chaque équipe, via la formule logistique standard des
@@ -352,16 +356,18 @@ def _facteur_elo(elo_equipe1: Optional[float], elo_equipe2: Optional[float]) -> 
     identifié et corrigé après un vrai cas remonté (Arsenal donné quasi
     à égalité face à un club de division inférieure).
 
+    diviseur_echelle est paramétrable (défaut = DIVISEUR_ECHELLE_ELO)
+    uniquement pour permettre au backtest de tester différentes valeurs
+    sans jamais affecter le comportement réel de l'appli.
+
     Sans ELO disponible pour les deux équipes : (1.0, 1.0), neutre —
     n'affecte pas le calcul basé sur les buts récents.
     """
     if elo_equipe1 is None or elo_equipe2 is None:
         return 1.0, 1.0
 
-    DIVISEUR_ECHELLE_BESOCCER = 30  # ~73/27 pour un écart de 13 points, ~81/19 pour 19 points
-
-    force1 = 10 ** (elo_equipe1 / DIVISEUR_ECHELLE_BESOCCER)
-    force2 = 10 ** (elo_equipe2 / DIVISEUR_ECHELLE_BESOCCER)
+    force1 = 10 ** (elo_equipe1 / diviseur_echelle)
+    force2 = 10 ** (elo_equipe2 / diviseur_echelle)
     part1 = force1 / (force1 + force2)  # entre 0 et 1
 
     # part1 = 0.5 (équipes égales) -> multiplicateur neutre (1.0, 1.0)
@@ -399,7 +405,9 @@ def _choisir_stats_contexte(stats_globales: Optional[Dict[str, Any]], domicile: 
     }
 
 
-def _ponderer_elo_par_confiance(facteur_elo: float, confiance_forme: float) -> float:
+def _ponderer_elo_par_confiance(
+    facteur_elo: float, confiance_forme: float, coefficient_attenuation: float = COEFFICIENT_ATTENUATION_ELO
+) -> float:
     """
     Réduit l'influence de l'ELO quand on dispose déjà d'une forme récente
     fiable (beaucoup de matchs pondérés disponibles), et la laisse
@@ -407,8 +415,13 @@ def _ponderer_elo_par_confiance(facteur_elo: float, confiance_forme: float) -> f
     faible) — l'ELO résume toute la saison de chaque équipe, donc plus
     utile précisément quand les derniers matchs ne suffisent pas à eux
     seuls à juger correctement le niveau actuel.
+
+    coefficient_attenuation est paramétrable (défaut =
+    COEFFICIENT_ATTENUATION_ELO) uniquement pour permettre au backtest
+    de tester différentes valeurs sans jamais affecter le comportement
+    réel de l'appli.
     """
-    attenuation = 1 - (confiance_forme * 0.5)  # jusqu'à -50% d'effet ELO si forme très fiable
+    attenuation = 1 - (confiance_forme * coefficient_attenuation)
     return 1.0 + (facteur_elo - 1.0) * attenuation
 
 
@@ -421,9 +434,12 @@ def generer_pronostic(
     elo_confrontation: Optional[Dict[str, Any]] = None,
     rho_dixon_coles: float = RHO_DIXON_COLES,
     poids_lissage: float = POIDS_LISSAGE,
+    diviseur_echelle_elo: float = DIVISEUR_ECHELLE_ELO,
+    coefficient_attenuation_elo: float = COEFFICIENT_ATTENUATION_ELO,
 ) -> Dict[str, Any]:
     """
-    rho_dixon_coles et poids_lissage sont paramétrables uniquement pour
+    rho_dixon_coles, poids_lissage, diviseur_echelle_elo et
+    coefficient_attenuation_elo sont paramétrables uniquement pour
     permettre au backtest de tester différents réglages sans jamais
     affecter /match/analyse pour les vrais utilisateurs (qui appelle
     toujours cette fonction avec les valeurs par défaut).
@@ -454,13 +470,13 @@ def generer_pronostic(
 
     elo1 = elo_confrontation.get("elo_equipe1") if elo_confrontation else None
     elo2 = elo_confrontation.get("elo_equipe2") if elo_confrontation else None
-    facteur_elo1, facteur_elo2 = _facteur_elo(elo1, elo2)
+    facteur_elo1, facteur_elo2 = _facteur_elo(elo1, elo2, diviseur_echelle_elo)
 
     # L'ELO pèse plus lourd quand la forme récente est peu fiable (peu de
     # matchs pondérés disponibles), et moins quand elle est déjà solide.
     confiance_moyenne = (confiance1 + confiance2) / 2
-    facteur_elo1 = _ponderer_elo_par_confiance(facteur_elo1, confiance_moyenne)
-    facteur_elo2 = _ponderer_elo_par_confiance(facteur_elo2, confiance_moyenne)
+    facteur_elo1 = _ponderer_elo_par_confiance(facteur_elo1, confiance_moyenne, coefficient_attenuation_elo)
+    facteur_elo2 = _ponderer_elo_par_confiance(facteur_elo2, confiance_moyenne, coefficient_attenuation_elo)
 
     lambda1 *= facteur_elo1
     lambda2 *= facteur_elo2

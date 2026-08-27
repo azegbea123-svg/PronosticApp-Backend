@@ -607,12 +607,16 @@ class MatchBacktest(BaseModel):
     equipe2: str
     typeMatch: str
     resultatReel: str  # "V1", "NUL" ou "V2"
+    butsEquipe1: Optional[int] = None  # optionnel — permet de vérifier aussi BTTS et over/under si fourni
+    butsEquipe2: Optional[int] = None
 
 
 class BacktestRequest(BaseModel):
     matchs: List[MatchBacktest]
     rho_dixon_coles: Optional[float] = None
     poids_lissage: Optional[float] = None
+    diviseur_echelle_elo: Optional[float] = None
+    coefficient_attenuation_elo: Optional[float] = None
 
 
 @app.post("/debug/backtest", tags=["✏️ Admin — Actions"])
@@ -639,9 +643,15 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
     """
     auth.exiger_admin(uid)
 
-    from .analysis import RHO_DIXON_COLES, POIDS_LISSAGE
+    from .analysis import RHO_DIXON_COLES, POIDS_LISSAGE, DIVISEUR_ECHELLE_ELO, COEFFICIENT_ATTENUATION_ELO
     rho = requete.rho_dixon_coles if requete.rho_dixon_coles is not None else RHO_DIXON_COLES
     lissage = requete.poids_lissage if requete.poids_lissage is not None else POIDS_LISSAGE
+    diviseur_elo = requete.diviseur_echelle_elo if requete.diviseur_echelle_elo is not None else DIVISEUR_ECHELLE_ELO
+    coeff_elo = (
+        requete.coefficient_attenuation_elo
+        if requete.coefficient_attenuation_elo is not None
+        else COEFFICIENT_ATTENUATION_ELO
+    )
 
     details = []
     corrects_1x2 = 0
@@ -664,6 +674,8 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
                 elo_confrontation=elo_confrontation,
                 rho_dixon_coles=rho,
                 poids_lissage=lissage,
+                diviseur_echelle_elo=diviseur_elo,
+                coefficient_attenuation_elo=coeff_elo,
             )
         except Exception as e:
             return {
@@ -676,7 +688,8 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
             resultat["probabiliteMatchNul"],
             resultat["probabiliteVictoireEquipe2"],
         )
-        return {
+
+        detail = {
             "equipe1": m.equipe1,
             "equipe2": m.equipe2,
             "probabilites": {
@@ -689,6 +702,35 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
             "correct": predit == m.resultatReel,
         }
 
+        # Vérification BTTS/over-under, uniquement si le score exact a
+        # été fourni (sinon on ne peut tout simplement pas savoir).
+        if m.butsEquipe1 is not None and m.butsEquipe2 is not None:
+            total_buts_reel = m.butsEquipe1 + m.butsEquipe2
+            btts_reel = m.butsEquipe1 > 0 and m.butsEquipe2 > 0
+
+            detail["verification_marches"] = {
+                "btts": {
+                    "probabilite_predite": resultat["probabiliteBTTS"],
+                    "reel": btts_reel,
+                    "predit_oui": resultat["probabiliteBTTS"] > 0.5,
+                    "correct": (resultat["probabiliteBTTS"] > 0.5) == btts_reel,
+                },
+                "over_1_5": {
+                    "probabilite_predite": resultat["probabiliteOver15"],
+                    "reel": total_buts_reel > 1.5,
+                    "predit_oui": resultat["probabiliteOver15"] > 0.5,
+                    "correct": (resultat["probabiliteOver15"] > 0.5) == (total_buts_reel > 1.5),
+                },
+                "over_2_5": {
+                    "probabilite_predite": resultat["probabiliteOver25"],
+                    "reel": total_buts_reel > 2.5,
+                    "predit_oui": resultat["probabiliteOver25"] > 0.5,
+                    "correct": (resultat["probabiliteOver25"] > 0.5) == (total_buts_reel > 2.5),
+                },
+            }
+
+        return detail
+
     taille_lot = 4
     for i in range(0, len(requete.matchs), taille_lot):
         lot = requete.matchs[i : i + taille_lot]
@@ -700,12 +742,31 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
     corrects_1x2 = sum(1 for d in details if d.get("correct"))
     total_valides = len([d for d in details if "erreur" not in d])
 
+    # Statistiques BTTS/over-under, uniquement sur les matchs où le score était fourni
+    avec_score = [d for d in details if "verification_marches" in d]
+    stats_marches = None
+    if avec_score:
+        stats_marches = {}
+        for marche in ("btts", "over_1_5", "over_2_5"):
+            corrects_marche = sum(1 for d in avec_score if d["verification_marches"][marche]["correct"])
+            stats_marches[marche] = {
+                "total_verifies": len(avec_score),
+                "corrects": corrects_marche,
+                "taux_reussite": round(corrects_marche / len(avec_score), 3),
+            }
+
     return {
-        "parametres_utilises": {"rho_dixon_coles": rho, "poids_lissage": lissage},
+        "parametres_utilises": {
+            "rho_dixon_coles": rho,
+            "poids_lissage": lissage,
+            "diviseur_echelle_elo": diviseur_elo,
+            "coefficient_attenuation_elo": coeff_elo,
+        },
         "total_matchs": len(requete.matchs),
         "total_valides": total_valides,
         "corrects_1x2": corrects_1x2,
         "taux_reussite_1x2": round(corrects_1x2 / total_valides, 3) if total_valides > 0 else None,
+        "stats_marches_avances": stats_marches,
         "details": details,
     }
 
