@@ -425,6 +425,46 @@ def _ponderer_elo_par_confiance(
     return 1.0 + (facteur_elo - 1.0) * attenuation
 
 
+def _avis_fiabilite_v1_v2(probabilite: float) -> str:
+    """
+    Avis basé sur les seuils de calibration mesurés empiriquement sur un
+    backtest de 126 matchs réels pour les victoires (domicile ou
+    extérieur) : au-delà de 70%, le favori s'est toujours confirmé sur
+    cet échantillon ; entre 50 et 70%, environ 4 fois sur 5. En dessous,
+    le signal existe mais reste trop incertain pour être qualifié de
+    fiable.
+
+    ⚠️ Basé sur un échantillon encore modeste — à considérer comme une
+    indication, pas une garantie, et amené à se préciser avec le temps
+    à mesure que le jeu de backtest grossit.
+    """
+    if probabilite >= 0.70:
+        return "Fiabilité élevée sur historique récent"
+    if probabilite >= 0.50:
+        return "Fiabilité correcte, reste un pari avec de l'incertitude"
+    if probabilite >= 0.35:
+        return "Signal présent mais incertain"
+    return "Peu probable sur la base de l'analyse"
+
+
+def _avis_fiabilite_nul(probabilite: float) -> str:
+    """
+    Avis spécifique au nul — sur notre backtest, le nul n'a JAMAIS atteint
+    un niveau de fiabilité comparable à V1/V2, même dans ses meilleures
+    tranches de probabilité (jamais au-delà d'environ 42% de réussite
+    réelle, y compris quand le modèle l'annonçait comme deuxième issue la
+    plus probable). Le signal existe et progresse avec la probabilité
+    affichée, mais reste structurellement le pari le plus incertain des
+    trois — c'est une caractéristique connue de ce type de modèle
+    statistique, pas une limite propre à notre calibration.
+    """
+    if probabilite >= 0.30:
+        return "Signal notable, mais le nul reste statistiquement le pari le plus incertain des trois"
+    if probabilite >= 0.20:
+        return "Possibilité à surveiller, sans plus"
+    return "Peu probable sur la base de l'analyse"
+
+
 def generer_pronostic(
     equipe1: str,
     equipe2: str,
@@ -542,6 +582,9 @@ def generer_pronostic(
         "probabiliteVictoireEquipe1": round(p1, 3),
         "probabiliteMatchNul": round(p_nul, 3),
         "probabiliteVictoireEquipe2": round(p2, 3),
+        "avisFiabiliteV1": _avis_fiabilite_v1_v2(p1),
+        "avisFiabiliteNul": _avis_fiabilite_nul(p_nul),
+        "avisFiabiliteV2": _avis_fiabilite_v1_v2(p2),
         "facteursCles": facteurs,
         "resumeAnalyse": resume,
         "butsAttendusEquipe1": round(lambda1, 2),

@@ -19,6 +19,9 @@ class MatchAnalysisResponse(BaseModel):
     probabiliteVictoireEquipe1: float
     probabiliteMatchNul: float
     probabiliteVictoireEquipe2: float
+    avisFiabiliteV1: str
+    avisFiabiliteNul: str
+    avisFiabiliteV2: str
     facteursCles: List[str]
     resumeAnalyse: str
     butsAttendusEquipe1: float
