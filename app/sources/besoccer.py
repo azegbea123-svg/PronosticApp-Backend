@@ -92,6 +92,7 @@ _TOKENS_A_RETIRER = {"fc", "cf", "afc", "cd", "sd", "ud", "rc", "ac", "ca", "de"
 # saisi, en minuscule et sans accents).
 _SLUGS_CONNUS: dict = {
     "marseille": "olympique-marsella",  # PAS "olympique-marseille" — vérifié
+    "cologne": "1-fc-koln",  # ⚠️ hypothèse (nom officiel "1. FC Köln"), pas encore confirmée sur une vraie page
 }
 
 
