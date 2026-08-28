@@ -110,6 +110,9 @@ def _slugify(texte: str) -> str:
 _EQUIVALENCES = [
     ("united", "utd"),
     ("saint", "st"),
+    ("munich", "munchen"),  # BeSoccer semble utiliser l'orthographe allemande (cas réel : Bayern Munich)
+    ("cologne", "koln"),
+    ("nuremberg", "nurnberg"),
 ]
 
 
