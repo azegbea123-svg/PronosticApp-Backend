@@ -906,3 +906,75 @@ def debug_predictions_verifiees(uid: str = Depends(auth.utilisateur_courant)):
     ]
 
     return {"total": len(matchs_backtest), "matchs": matchs_backtest}
+
+
+# ==== Calculateur de mises (dutching) ====
+#
+# Répartit un budget entre plusieurs paris pour obtenir le MÊME gain
+# quel que soit celui qui se réalise (technique dite "dutching"). Pur
+# calcul mathématique, aucune donnée externe requise.
+#
+# ⚠️ Ne peut jamais garantir un gain cible arbitraire : la somme des
+# probabilités implicites (1/cote pour chaque pari) reflète la marge du
+# bookmaker. Si elle dépasse 100% (quasi toujours en pratique, sauf
+# rare erreur de cotation exploitable), le retour égal atteignable avec
+# un budget donné est mathématiquement plafonné — on le calcule et on le
+# dit clairement plutôt que d'inventer une répartition qui donnerait une
+# fausse impression de gain garanti.
+
+class ParimutuelRequest(BaseModel):
+    cotes: List[float]  # ex: [1.64, 1.22, 1.40]
+    budget: float  # budget total disponible, en FCFA (ou toute devise)
+    gain_cible: Optional[float] = None  # optionnel : gain souhaité si l'un des paris passe
+
+
+@app.post("/outils/calculateur-mises", tags=["✏️ Outils — Actions"])
+def calculateur_mises(requete: ParimutuelRequest, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    Répartit `budget` entre les paris de `cotes` pour un gain identique
+    quel que soit celui qui gagne (dutching). Si `gain_cible` est fourni,
+    indique en plus le budget qu'il faudrait réellement pour l'atteindre,
+    et précise si le budget donné suffit ou non — sans jamais prétendre
+    qu'une répartition peut dépasser ce que les cotes permettent
+    mathématiquement.
+    """
+    if not requete.cotes or any(c <= 1.0 for c in requete.cotes):
+        raise HTTPException(400, "Toutes les cotes doivent être des nombres supérieurs à 1.0")
+    if requete.budget <= 0:
+        raise HTTPException(400, "Le budget doit être positif")
+
+    inverses = [1.0 / c for c in requete.cotes]
+    somme_inverses = sum(inverses)
+
+    mises = [requete.budget * inv / somme_inverses for inv in inverses]
+    retour_egal = requete.budget / somme_inverses  # identique pour chaque mise, par construction
+    gain_net_egal = retour_egal - requete.budget
+
+    reponse: Dict[str, Any] = {
+        "cotes": requete.cotes,
+        "budget": requete.budget,
+        "somme_probabilites_implicites_pourcent": round(somme_inverses * 100, 1),
+        "marge_bookmaker_pourcent": round((somme_inverses - 1) * 100, 1) if somme_inverses > 1 else 0.0,
+        "mises_par_pari": [round(m, 0) for m in mises],
+        "retour_si_lun_gagne": round(retour_egal, 0),
+        "gain_net_si_lun_gagne": round(gain_net_egal, 0),
+        "rentable": gain_net_egal > 0,
+    }
+
+    if requete.gain_cible is not None:
+        budget_necessaire = requete.gain_cible * somme_inverses
+        reponse["gain_cible"] = requete.gain_cible
+        reponse["budget_necessaire_pour_gain_cible"] = round(budget_necessaire, 0)
+        reponse["budget_actuel_suffisant"] = requete.budget >= budget_necessaire
+        if requete.budget < budget_necessaire:
+            reponse["message"] = (
+                f"Avec ces cotes, un gain garanti de {requete.gain_cible:.0f} (quel que soit le pari qui passe) "
+                f"nécessite un budget d'au moins {budget_necessaire:.0f}, pas {requete.budget:.0f}. "
+                f"Avec {requete.budget:.0f}, le retour garanti atteignable est de {retour_egal:.0f}."
+            )
+        else:
+            reponse["message"] = (
+                f"Le budget de {requete.budget:.0f} suffit pour garantir au moins {requete.gain_cible:.0f}."
+            )
+
+    return reponse
