@@ -191,6 +191,17 @@ def _candidats_slug(nom_equipe: str) -> List[str]:
             _ajouter(f"{racine}-{suffixe_propre}")
             _ajouter(f"{racine}{alternative}")
 
+    # 8. Suffixe "-fc"/"-afc" AJOUTÉ (pas juste retiré) — plusieurs clubs
+    # anglais confirmés en usage réel utilisent un slug BeSoccer avec ce
+    # suffixe alors que le nom courant tapé par l'utilisateur ne le
+    # contient pas (ex: "aston-villa-fc" pour "Aston Villa"). Testé sur
+    # le nom nettoyé des tokens génériques ET sur le nom complet tel quel,
+    # pour couvrir les deux cas.
+    for base_pour_suffixe in {_slugify(base), _slugify(nom_equipe)}:
+        if base_pour_suffixe:
+            _ajouter(f"{base_pour_suffixe}-fc")
+            _ajouter(f"{base_pour_suffixe}-afc")
+
     return candidats
 
 
