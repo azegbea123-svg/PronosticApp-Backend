@@ -10,7 +10,7 @@ import httpx
 from pydantic import BaseModel
 
 from .models import MatchAnalysisRequest, MatchAnalysisResponse
-from .sources import sofascore, besoccer, flashscore
+from .sources import sofascore, besoccer, flashscore, api_football
 from .analysis import generer_pronostic
 from . import db
 from . import repo
@@ -108,6 +108,36 @@ async def debug_verifier_clubs(noms: List[str], uid: str = Depends(auth.utilisat
         "total_echecs": len(resultats_echecs),
         "echecs": resultats_echecs,
     }
+
+
+@app.get("/debug/api-football", tags=["📖 Admin — Diagnostic"])
+async def debug_api_football(
+    equipe1: Optional[str] = None,
+    equipe2: Optional[str] = None,
+    uid: str = Depends(auth.utilisateur_courant),
+):
+    """
+    🔧 Diagnostic (admin) — montre le quota restant (protection contre
+    une nouvelle suspension) et, si equipe1/equipe2 sont fournis, teste
+    la résolution d'ID et l'historique de confrontations directes.
+    """
+    auth.exiger_admin(uid)
+    from .config import CLE_API_FOOTBALL
+    from .sources import api_football
+
+    resultat: Dict[str, Any] = {
+        "cle_configuree": bool(CLE_API_FOOTBALL),
+        "quota": api_football.quota_restant(),
+    }
+
+    if equipe1:
+        resultat["id_equipe1"] = await api_football.get_team_id(equipe1)
+    if equipe2:
+        resultat["id_equipe2"] = await api_football.get_team_id(equipe2)
+    if equipe1 and equipe2:
+        resultat["historique_confrontations"] = await api_football.get_historique_confrontations(equipe1, equipe2)
+
+    return resultat
 
 
 @app.get("/debug/besoccer", tags=["📖 Admin — Diagnostic"])
@@ -253,6 +283,26 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
         stats2_sources,
         elo_confrontation=elo_confrontation,
     )
+
+    # Enrichissement optionnel via API-Football : historique COMPLET des
+    # confrontations directes (contrairement à la détection BeSoccer, qui
+    # ne regarde que par coïncidence dans les derniers matchs scrappés).
+    # Se dégrade silencieusement si la clé n'est pas configurée, si le
+    # quota est atteint, ou si l'équipe est introuvable — n'affecte
+    # jamais le calcul des probabilités, purement informatif.
+    try:
+        historique = await api_football.get_historique_confrontations(requete.equipe1, requete.equipe2)
+        if historique:
+            v1 = sum(1 for m in historique if (m["equipe_domicile"] == requete.equipe1 and m["buts_domicile"] > m["buts_exterieur"]) or (m["equipe_exterieur"] == requete.equipe1 and m["buts_exterieur"] > m["buts_domicile"]))
+            nuls = sum(1 for m in historique if m["buts_domicile"] == m["buts_exterieur"])
+            v2 = len(historique) - v1 - nuls
+            resultat["facteursCles"].append(
+                f"Historique complet des confrontations directes (API-Football, {len(historique)} derniers matchs) : "
+                f"{v1} victoire(s) {requete.equipe1}, {nuls} nul(s), {v2} victoire(s) {requete.equipe2}"
+            )
+    except Exception:
+        pass  # enrichissement optionnel — ne doit jamais faire échouer l'analyse principale
+
     resultat["vip"] = est_vip
     resultat["pronosticsRestantsAujourdhui"] = pronostics_restants
 
