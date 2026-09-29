@@ -58,21 +58,29 @@ async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
         # liste vide qui ferait croire à "aucun match aujourd'hui".
         return repo.lister_matchs_jour(jour_iso)
 
-    matchs = [
-        _normaliser(f) for f in fixtures if f["league"]["id"] in CHAMPIONNATS_SUIVIS
-    ]
+    # ⚠️ Liste NON filtrée par championnat : le client veut voir TOUS les
+    # matchs remontés par API-Football pour choisir, pas seulement les
+    # grands championnats. Le filtre CHAMPIONNATS_SUIVIS ne sert plus
+    # qu'à décider POUR QUELS matchs on vérifie la disponibilité en
+    # avance (voir plus bas) — pas à cacher les autres matchs.
+    matchs = [_normaliser(f) for f in fixtures]
+
+    a_verifier = [m for m in matchs if m["league_id"] in CHAMPIONNATS_SUIVIS]
 
     # ⚠️ Même prudence que /debug/verifier-clubs : petits lots + pause
-    # entre chaque, pour ne pas redéclencher un blocage BeSoccer avec un
-    # jour à beaucoup de matchs (rappel : un test en rafale de 150 clubs
-    # avait déjà causé un blocage temporaire).
+    # entre chaque, pour ne pas redéclencher un blocage BeSoccer. On ne
+    # vérifie QUE les grands championnats — vérifier tous les matchs du
+    # monde (souvent 500-1000+/jour) redonnerait le volume de scraping
+    # qui avait déjà causé un blocage temporaire. Les autres matchs
+    # restent affichés dans la liste, simplement marqués indisponibles
+    # par défaut (valeur posée dans _normaliser).
     taille_lot = 3
-    for i in range(0, len(matchs), taille_lot):
-        lot = matchs[i : i + taille_lot]
+    for i in range(0, len(a_verifier), taille_lot):
+        lot = a_verifier[i : i + taille_lot]
         disponibilites = await asyncio.gather(*[_verifier_disponibilite(m) for m in lot])
         for m, dispo in zip(lot, disponibilites):
             m["donneesDisponibles"] = dispo
-        if i + taille_lot < len(matchs):
+        if i + taille_lot < len(a_verifier):
             await asyncio.sleep(2.0)
 
     repo.enregistrer_matchs_jour(jour_iso, matchs)

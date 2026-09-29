@@ -19,11 +19,15 @@ CLE_API_FOOTBALL = os.environ.get("API_FOOTBALL_KEY", "")
 
 # ==== Liste de matchs J / J+1 (nouvelle approche) ====
 #
-# Championnats suivis pour /matchs — clé = ID API-Football du
-# championnat, valeur = libellé affiché. Limité volontairement (voir
-# discussion) plutôt que "tous les matchs du monde", pour rester dans le
-# quota API-Football et ne pas relancer un blocage BeSoccer avec un
-# volume de scraping ingérable.
+# /matchs affiche TOUS les matchs remontés par API-Football, sans
+# filtre — ceci n'est PAS un filtre d'affichage. C'est la liste des
+# championnats pour lesquels on vérifie la disponibilité des données
+# BeSoccer À L'AVANCE (clé = ID API-Football du championnat, valeur =
+# libellé). Un match hors de cette liste reste visible, simplement
+# marqué "données indisponibles" par défaut — vérifier BeSoccer pour
+# absolument tous les matchs du monde (souvent 500-1000+/jour)
+# relancerait le volume de scraping qui avait déjà causé un blocage
+# temporaire.
 #
 # ⚠️ IDs à vérifier — utilise /debug/ligues?pays=<pays> (nouvel endpoint
 # admin) pour confirmer/ajuster, notamment pour trouver l'ID du
