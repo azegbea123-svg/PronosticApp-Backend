@@ -23,6 +23,8 @@ COLLECTION_UTILISATEURS = "utilisateurs"
 COLLECTION_CODES_VIP = "codes_vip"
 COLLECTION_PAIEMENTS = "paiements_en_attente"
 COLLECTION_PREDICTIONS_BACKTEST = "predictions_backtest"
+COLLECTION_MATCHS_JOUR = "matchs_jour"
+COLLECTION_MATCHS_JOUR_META = "matchs_jour_meta"
 
 
 def _maintenant():
@@ -80,11 +82,6 @@ def pronostics_utilises_aujourdhui(uid: str) -> int:
 
     debut_jour = _debut_journee()
 
-    # Filtrage DIRECTEMENT côté Firestore (uid + date) — beaucoup plus
-    # rapide que tout récupérer et filtrer en Python, et surtout ne
-    # ralentit pas au fil du temps à mesure que l'historique grossit.
-    # Nécessite un index composite (uid + cree_le) — Firestore le
-    # signale avec un lien direct pour le créer en un clic si absent.
     try:
         query = (
             client.collection(COLLECTION_PRONOSTICS)
@@ -93,8 +90,6 @@ def pronostics_utilises_aujourdhui(uid: str) -> int:
         )
         return len(list(query.stream()))
     except Exception:
-        # Repli : l'ancienne méthode (plus lente mais fonctionne toujours
-        # sans configuration Firestore supplémentaire)
         docs = client.collection(COLLECTION_PRONOSTICS).where("uid", "==", uid).stream()
         return sum(1 for d in docs if (d.get("cree_le") or debut_jour) >= debut_jour)
 
@@ -110,11 +105,6 @@ def obtenir_utilisateur(uid: str) -> Optional[Dict[str, Any]]:
 
 
 def creer_ou_maj_profil(uid: str, email: Optional[str] = None, telephone: Optional[str] = None) -> None:
-    """
-    Crée le profil au premier contact, ou met à jour seulement les champs
-    fournis sinon (merge=True — ne touche pas aux autres champs déjà en
-    base, comme le statut VIP).
-    """
     client = db.get_client()
     if not client:
         return
@@ -235,12 +225,6 @@ def marquer_paiement_traite(tx_reference: str) -> None:
 # ==== Suppression de compte (droit à l'effacement) ====
 
 def supprimer_toutes_donnees_utilisateur(uid: str) -> None:
-    """
-    Supprime toutes les données Firestore associées à un compte : ses
-    pronostics et son profil (statut VIP inclus). Ne touche pas au compte
-    Firebase Authentication lui-même — ça, c'est fait séparément via
-    auth.supprimer_compte_firebase().
-    """
     client = db.get_client()
     if not client:
         return
@@ -253,15 +237,6 @@ def supprimer_toutes_donnees_utilisateur(uid: str) -> None:
 
 
 # ==== Collecte progressive de matchs pour le backtest ====
-#
-# Contrairement à l'historique/vérification retiré précédemment (jugé
-# redondant avec BeSoccer), ceci sert un but différent et bien réel :
-# BeSoccer ne donne que la forme ACTUELLE d'une équipe, jamais sa forme
-# à une date passée précise. Un backtest sur de vrais matchs anciens est
-# donc invalide (biais temporel découvert empiriquement). En enregistrant
-# la prédiction juste AVANT le match, puis en constatant le résultat
-# quelques jours après, chaque match ajouté ici reste valide pour de
-# vrai, et la base grossit naturellement au fil du temps.
 
 def enregistrer_prediction_backtest(
     equipe1: str,
@@ -273,7 +248,6 @@ def enregistrer_prediction_backtest(
     probabilite_nul: float,
     probabilite_v2: float,
 ) -> str:
-    """Enregistre une prédiction en attente de vérification. Renvoie l'ID du document créé."""
     client = db.get_client()
     if not client:
         raise RuntimeError("Firestore non configuré")
@@ -296,7 +270,6 @@ def enregistrer_prediction_backtest(
 
 
 def lister_predictions_en_attente(limite: int = 50) -> List[Dict[str, Any]]:
-    """Renvoie les prédictions pas encore vérifiées, les plus anciennes en premier."""
     client = db.get_client()
     if not client:
         return []
@@ -316,7 +289,6 @@ def lister_predictions_en_attente(limite: int = 50) -> List[Dict[str, Any]]:
 
 
 def marquer_prediction_verifiee(prediction_id: str, resultat_reel: str) -> None:
-    """Enregistre le résultat réel constaté et marque la prédiction comme vérifiée."""
     client = db.get_client()
     if not client:
         return
@@ -328,7 +300,6 @@ def marquer_prediction_verifiee(prediction_id: str, resultat_reel: str) -> None:
 
 
 def lister_predictions_verifiees(limite: int = 500) -> List[Dict[str, Any]]:
-    """Renvoie les prédictions déjà vérifiées — c'est le vrai jeu de backtest valide, qui grossit dans le temps."""
     client = db.get_client()
     if not client:
         return []
@@ -344,3 +315,52 @@ def lister_predictions_verifiees(limite: int = 500) -> List[Dict[str, Any]]:
         d["id"] = doc.id
         resultats.append(d)
     return resultats
+
+
+# ==== Liste de matchs J / J+1 (nouvelle approche) ====
+#
+# COLLECTION_MATCHS_JOUR : un document par match (id = fixture_id
+# API-Football), avec le champ "jour" (YYYY-MM-DD) pour filtrer.
+# COLLECTION_MATCHS_JOUR_META : un document par jour, juste pour savoir
+# QUAND la liste/disponibilité a été reconstruite pour la dernière fois
+# (voir TTL_RAFRAICHISSEMENT_MATCHS_SECONDES dans config.py).
+
+def enregistrer_matchs_jour(jour_iso: str, matchs: List[Dict[str, Any]]) -> None:
+    """Remplace en une seule opération tous les matchs connus pour ce jour."""
+    client = db.get_client()
+    if not client:
+        return
+    batch = client.batch()
+    for m in matchs:
+        ref = client.collection(COLLECTION_MATCHS_JOUR).document(str(m["fixture_id"]))
+        batch.set(ref, {**m, "jour": jour_iso, "maj_le": _maintenant()})
+    batch.commit()
+
+
+def lister_matchs_jour(jour_iso: str) -> List[Dict[str, Any]]:
+    client = db.get_client()
+    if not client:
+        return []
+    query = client.collection(COLLECTION_MATCHS_JOUR).where("jour", "==", jour_iso)
+    resultats = [d.to_dict() for d in query.stream()]
+    resultats.sort(key=lambda m: m.get("date", ""))
+    return resultats
+
+
+def dernier_rafraichissement_matchs(jour_iso: str) -> Optional[datetime]:
+    client = db.get_client()
+    if not client:
+        return None
+    doc = client.collection(COLLECTION_MATCHS_JOUR_META).document(jour_iso).get()
+    if not doc.exists:
+        return None
+    return doc.to_dict().get("rafraichi_le")
+
+
+def marquer_matchs_rafraichis(jour_iso: str) -> None:
+    client = db.get_client()
+    if not client:
+        return
+    client.collection(COLLECTION_MATCHS_JOUR_META).document(jour_iso).set(
+        {"rafraichi_le": _maintenant()}
+    )

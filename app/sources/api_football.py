@@ -1,11 +1,14 @@
 """
 Intégration API-Football (api-sports.io) — utilisée en COMPLÉMENT de
-BeSoccer, jamais en remplacement, pour deux raisons précises où BeSoccer
-est structurellement limité :
+BeSoccer, jamais en remplacement, pour trois raisons précises où
+BeSoccer est structurellement limité :
   1. Historique COMPLET des confrontations directes (BeSoccer ne donne
      qu'un coup d'œil dans les derniers matchs déjà scrappés, pas un
      vrai historique dédié).
   2. Secours si BeSoccer échoue complètement pour une équipe.
+  3. Liste officielle des matchs programmés par jour/championnat (voir
+     get_fixtures_du_jour) — BeSoccer n'expose pas ça de façon fiable
+     sans scraper une page de calendrier par championnat.
 
 ⚠️ PLAN GRATUIT = 10 requêtes/minute, 100/jour. Dépasser la limite par
 MINUTE peut bloquer le compte "sans préavis" (documentation officielle),
@@ -29,14 +32,12 @@ BASE_URL = "https://v3.football.api-sports.io"
 HEADERS = {"x-apisports-key": CLE_API_FOOTBALL}
 
 # ==== Limiteur de débit — marges de sécurité sous les vraies limites ====
-# Volontairement plus strict que les seuils réels (10/min, 100/jour) pour
-# garder de la marge : 7/min et 85/jour plutôt que de coller au maximum.
 _MAX_APPELS_PAR_MINUTE = 7
 _MAX_APPELS_PAR_JOUR = 85
 
-_horodatages_appels: List[float] = []  # fenêtre glissante des appels de la dernière minute
+_horodatages_appels: List[float] = []
 _compteur_jour = 0
-_jour_compteur_reinitialise: Optional[str] = None  # date UTC (YYYY-MM-DD) du dernier reset
+_jour_compteur_reinitialise: Optional[str] = None
 
 
 def _jour_utc_actuel() -> str:
@@ -44,11 +45,6 @@ def _jour_utc_actuel() -> str:
 
 
 def _peut_appeler() -> bool:
-    """
-    Vérifie les deux limites (par minute ET par jour) avant d'autoriser
-    un appel. Ne fait jamais attendre — refuse simplement si on est trop
-    près de la limite, par sécurité.
-    """
     global _compteur_jour, _jour_compteur_reinitialise
 
     aujourd_hui = _jour_utc_actuel()
@@ -74,7 +70,6 @@ def _enregistrer_appel() -> None:
 
 
 def quota_restant() -> Dict[str, int]:
-    """Exposé pour diagnostic (voir /debug/api-football) — combien il reste avant la limite."""
     maintenant = time.time()
     appels_recents = len([t for t in _horodatages_appels if maintenant - t < 60])
     return {
@@ -87,9 +82,9 @@ def quota_restant() -> Dict[str, int]:
 
 async def _appeler(endpoint: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not CLE_API_FOOTBALL:
-        return None  # clé non configurée — désactivé silencieusement, pas d'erreur bruyante
+        return None
     if not _peut_appeler():
-        return None  # protection de débit — refuse plutôt que de risquer une suspension
+        return None
 
     _enregistrer_appel()
     try:
@@ -107,12 +102,6 @@ _CACHE_ID_EQUIPE: Dict[str, Optional[int]] = {}
 
 
 async def get_team_id(nom_equipe: str) -> Optional[int]:
-    """
-    Trouve l'identifiant API-Football d'une équipe par son nom. Mis en
-    cache de façon PERMANENTE (contrairement au cache BeSoccer à TTL) —
-    un ID d'équipe ne change jamais, autant ne consommer le quota qu'une
-    seule fois par équipe pour toute la durée de vie du serveur.
-    """
     cle = nom_equipe.strip().lower()
     if cle in _CACHE_ID_EQUIPE:
         return _CACHE_ID_EQUIPE[cle]
@@ -122,26 +111,16 @@ async def get_team_id(nom_equipe: str) -> Optional[int]:
     if data and data.get("response"):
         resultat_id = data["response"][0]["team"]["id"]
 
-    _CACHE_ID_EQUIPE[cle] = resultat_id  # même un échec est mis en cache — évite de re-tenter en boucle
+    _CACHE_ID_EQUIPE[cle] = resultat_id
     return resultat_id
 
 
 # ==== Cache de l'historique des confrontations directes ====
-_CACHE_H2H: Dict[str, tuple] = {}  # "id1-id2" (trié) -> (valeur, expire_a)
-_TTL_H2H_SECONDES = 7 * 24 * 3600  # 7 jours — un vrai historique change rarement d'une semaine à l'autre
+_CACHE_H2H: Dict[str, tuple] = {}
+_TTL_H2H_SECONDES = 7 * 24 * 3600
 
 
 async def get_historique_confrontations(equipe1: str, equipe2: str, limite: int = 10) -> Optional[List[Dict[str, Any]]]:
-    """
-    Historique COMPLET des confrontations directes entre deux équipes —
-    contrairement à besoccer._confrontation_recente qui ne fait que
-    regarder par coïncidence dans les derniers matchs déjà scrappés,
-    ceci interroge un vrai endpoint dédié à l'historique tête-à-tête.
-
-    Renvoie une liste de matchs (le plus récent en premier), ou None si
-    indisponible (clé non configurée, quota atteint, équipe introuvable,
-    ou erreur réseau) — jamais d'exception, cohérent avec besoccer.py.
-    """
     id1 = await get_team_id(equipe1)
     id2 = await get_team_id(equipe2)
     if id1 is None or id2 is None:
@@ -171,7 +150,47 @@ async def get_historique_confrontations(equipe1: str, equipe2: str, limite: int 
                 "buts_exterieur": buts["away"],
             })
         except (KeyError, TypeError):
-            continue  # entrée malformée — on l'ignore plutôt que de tout faire échouer
+            continue
 
     _CACHE_H2H[cle_cache] = (matchs, time.time() + _TTL_H2H_SECONDES)
     return matchs
+
+
+# ==== Liste des matchs par jour (nouvelle approche PronosticApp) ====
+
+async def get_fixtures_du_jour(jour_iso: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    Liste BRUTE des matchs programmés à cette date (format YYYY-MM-DD),
+    telle que renvoyée par API-Football — le filtrage par championnat
+    suivi se fait ensuite côté appelant (voir matchs.py). Une seule
+    requête par jour interrogé, protégée par le même limiteur de débit
+    que le reste du module.
+
+    Renvoie None si le quota est épuisé, la clé non configurée, ou en
+    cas d'erreur réseau — à l'appelant de décider quoi faire (ex: garder
+    la dernière liste connue plutôt que d'afficher une liste vide).
+    """
+    data = await _appeler("/fixtures", {"date": jour_iso})
+    if data is None:
+        return None
+    return data.get("response", [])
+
+
+async def rechercher_ligues(pays: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    🔧 Utilitaire de diagnostic (voir /debug/ligues) pour trouver l'ID
+    API-Football d'un championnat par pays — nécessaire pour compléter
+    CHAMPIONNATS_SUIVIS dans config.py (notamment le championnat
+    togolais, pas encore identifié).
+    """
+    data = await _appeler("/leagues", {"country": pays})
+    if data is None:
+        return None
+    return [
+        {
+            "id": l["league"]["id"],
+            "nom": l["league"]["name"],
+            "type": l["league"]["type"],
+        }
+        for l in data.get("response", [])
+    ]

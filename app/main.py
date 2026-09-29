@@ -16,6 +16,7 @@ from . import db
 from . import repo
 from . import paygate
 from . import auth
+from . import matchs as matchs_service
 from .config import PRIX_VIP_FCFA, DUREE_VIP_JOURS, LIMITE_GRATUITE_QUOTIDIENNE
 
 app = FastAPI(
@@ -322,6 +323,34 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
         pass
 
     return resultat
+
+
+@app.get("/matchs", tags=["📖 Pronostic — Infos"])
+async def lister_matchs(jour: str = "today", uid: str = Depends(auth.utilisateur_courant)):
+    """
+    Liste des matchs du jour ou du lendemain (jour="today"|"tomorrow"),
+    limitée aux championnats suivis (voir CHAMPIONNATS_SUIVIS dans
+    config.py), avec `donneesDisponibles` déjà calculé pour chaque match
+    (scraping BeSoccer fait en arrière-plan lors du rafraîchissement,
+    jamais au moment où le client clique). Utilise ensuite
+    /match/analyse pour l'analyse détaillée d'un match précis — même
+    moteur, même quota de 3 analyses gratuites par jour que d'habitude.
+    """
+    if jour not in ("today", "tomorrow"):
+        raise HTTPException(400, "jour doit être 'today' ou 'tomorrow'")
+    return await matchs_service.obtenir_matchs(jour)
+
+
+@app.get("/debug/ligues", tags=["📖 Admin — Diagnostic"])
+async def debug_ligues(pays: str, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Cherche l'ID API-Football d'un championnat par pays (ex:
+    pays=Togo) — utile pour compléter CHAMPIONNATS_SUIVIS dans
+    config.py, notamment pour trouver le championnat togolais.
+    """
+    auth.exiger_admin(uid)
+    resultat = await api_football.rechercher_ligues(pays)
+    return {"pays": pays, "ligues": resultat}
 
 
 class ProfilRequest(BaseModel):

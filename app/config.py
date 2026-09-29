@@ -16,3 +16,33 @@ MOT_DE_PASSE_ADMIN = os.environ.get("ADMIN_PASSWORD", "change-moi")
 # — voir sources/api_football.py pour le limiteur de débit qui protège
 # contre un nouveau blocage de compte.
 CLE_API_FOOTBALL = os.environ.get("API_FOOTBALL_KEY", "")
+
+# ==== Liste de matchs J / J+1 (nouvelle approche) ====
+#
+# Championnats suivis pour /matchs — clé = ID API-Football du
+# championnat, valeur = libellé affiché. Limité volontairement (voir
+# discussion) plutôt que "tous les matchs du monde", pour rester dans le
+# quota API-Football et ne pas relancer un blocage BeSoccer avec un
+# volume de scraping ingérable.
+#
+# ⚠️ IDs à vérifier — utilise /debug/ligues?pays=<pays> (nouvel endpoint
+# admin) pour confirmer/ajuster, notamment pour trouver l'ID du
+# championnat togolais.
+CHAMPIONNATS_SUIVIS = {
+    61: "Ligue 1",
+    39: "Premier League",
+    140: "La Liga",
+    135: "Serie A",
+    78: "Bundesliga",
+    2: "Ligue des Champions",
+    12: "Ligue des Champions CAF",
+    20: "Coupe de la Confédération CAF",
+    # TODO: ajouter ici l'ID du championnat togolais une fois trouvé
+}
+
+# Durée avant de reconsidérer la liste des matchs/disponibilités comme
+# périmée et de la reconstruire (nouvelle requête API-Football +
+# nouvelle vérification BeSoccer). 3h : largement assez réactif pour des
+# matchs qui ne changent pas d'heure en heure, sans solliciter les
+# quotas à chaque appel de /matchs.
+TTL_RAFRAICHISSEMENT_MATCHS_SECONDES = 3 * 3600
