@@ -1,25 +1,33 @@
 """
-Liste des matchs du jour / J+1, filtrée aux championnats suivis
-(CHAMPIONNATS_SUIVIS dans config.py), avec disponibilité des données
-d'analyse PRÉCALCULÉE — le scraping BeSoccer se fait en arrière-plan
-(dès qu'on reconstruit la liste), jamais au moment où le client clique
-sur un match. L'analyse détaillée elle-même reste /match/analyse,
-inchangé — même moteur, même quota de 3 gratuites/jour.
+Liste des matchs du jour / J+1 — TOUS les matchs remontés par
+API-Football, sans filtre par championnat.
 
-Le rafraîchissement se déclenche à la demande (au premier appel de
-/matchs qui trouve la liste périmée), pas via un cron séparé : plus
-simple à héberger sur Render (le plan gratuit s'endort de toute façon
-en cas d'inactivité, un cron externe serait nécessaire pour un vrai
-scheduler) et suffisant pour l'usage réel (peu d'appels concurrents).
+Disponibilité des données BeSoccer : vérifiée EN ARRIÈRE-PLAN, en
+priorité pour les matchs dont le coup d'envoi approche, et plafonnée
+par cycle (MAX_VERIFICATIONS_PAR_CYCLE) — vérifier tous les matchs
+d'une journée mondiale d'un coup (souvent 500-1000+ équipes) a déjà
+provoqué un blocage BeSoccer par le passé avec seulement 150 clubs
+d'un coup (voir sources/besoccer.py). La priorisation par horaire fait
+naturellement s'étaler la charge sur la journée ; le plafond est un
+filet de sécurité en plus, pour le cas où beaucoup de matchs
+deviendraient "imminents" en même temps (ex: au redémarrage du service
+après une pause, juste avant une grosse tranche horaire de matchs).
+
+Un match reste cliquable dans l'appli UNIQUEMENT une fois
+donneesDisponibles=true (voir MatchsScreen.kt côté Android) — pas de
+scraping à la demande dans cette version : tout se décide à l'avance.
 """
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from .config import CHAMPIONNATS_SUIVIS, TTL_RAFRAICHISSEMENT_MATCHS_SECONDES
+from .config import TTL_RAFRAICHISSEMENT_MATCHS_SECONDES
 from .sources import api_football, besoccer
 from . import repo
+
+# Nombre max de vérifications BeSoccer (équipes) par cycle en arrière-plan.
+MAX_VERIFICATIONS_PAR_CYCLE = 60
 
 
 def _jour_iso(offset: int = 0) -> str:
@@ -34,20 +42,8 @@ def _normaliser(fixture: Dict[str, Any]) -> Dict[str, Any]:
         "league": fixture["league"]["name"],
         "equipe1": fixture["teams"]["home"]["name"],
         "equipe2": fixture["teams"]["away"]["name"],
-        "donneesDisponibles": False,
+        "donneesDisponibles": None,  # None = pas encore vérifié (vérification en cours)
     }
-
-
-async def _verifier_disponibilite(match: Dict[str, Any]) -> bool:
-    """
-    Réutilise le cache BeSoccer existant (get_team_stats, TTL 6h succès /
-    1h échec) : un match déjà vérifié récemment, ou une équipe déjà
-    consultée pour un autre match du jour, ne redéclenche AUCUNE requête
-    HTTP supplémentaire — juste une lecture de cache mémoire.
-    """
-    stats1 = await besoccer.get_team_stats(match["equipe1"])
-    stats2 = await besoccer.get_team_stats(match["equipe2"])
-    return stats1 is not None and stats2 is not None
 
 
 async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
@@ -58,41 +54,81 @@ async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
         # liste vide qui ferait croire à "aucun match aujourd'hui".
         return repo.lister_matchs_jour(jour_iso)
 
-    # ⚠️ Liste NON filtrée par championnat : le client veut voir TOUS les
-    # matchs remontés par API-Football pour choisir, pas seulement les
-    # grands championnats. Le filtre CHAMPIONNATS_SUIVIS ne sert plus
-    # qu'à décider POUR QUELS matchs on vérifie la disponibilité en
-    # avance (voir plus bas) — pas à cacher les autres matchs.
-    matchs = [_normaliser(f) for f in fixtures]
+    # On garde le statut de disponibilité déjà connu pour un match déjà
+    # vu lors d'un précédent rafraîchissement — pas la peine de repasser
+    # "en attente" (et de re-vérifier BeSoccer) un match déjà confirmé.
+    deja_connus = {m["fixture_id"]: m for m in repo.lister_matchs_jour(jour_iso)}
 
-    a_verifier = [m for m in matchs if m["league_id"] in CHAMPIONNATS_SUIVIS]
-
-    # ⚠️ Même prudence que /debug/verifier-clubs : petits lots + pause
-    # entre chaque, pour ne pas redéclencher un blocage BeSoccer. On ne
-    # vérifie QUE les grands championnats — vérifier tous les matchs du
-    # monde (souvent 500-1000+/jour) redonnerait le volume de scraping
-    # qui avait déjà causé un blocage temporaire. Les autres matchs
-    # restent affichés dans la liste, simplement marqués indisponibles
-    # par défaut (valeur posée dans _normaliser).
-    taille_lot = 3
-    for i in range(0, len(a_verifier), taille_lot):
-        lot = a_verifier[i : i + taille_lot]
-        disponibilites = await asyncio.gather(*[_verifier_disponibilite(m) for m in lot])
-        for m, dispo in zip(lot, disponibilites):
-            m["donneesDisponibles"] = dispo
-        if i + taille_lot < len(a_verifier):
-            await asyncio.sleep(2.0)
+    matchs = []
+    for f in fixtures:
+        m = _normaliser(f)
+        ancien = deja_connus.get(m["fixture_id"])
+        if ancien and ancien.get("donneesDisponibles") is not None:
+            m["donneesDisponibles"] = ancien["donneesDisponibles"]
+        matchs.append(m)
 
     repo.enregistrer_matchs_jour(jour_iso, matchs)
     repo.marquer_matchs_rafraichis(jour_iso)
     return matchs
 
 
+def _minutes_avant_coup_envoi(match: Dict[str, Any]) -> float:
+    """Plus petit = plus urgent à vérifier. Un match déjà commencé depuis
+    plus de 3h passe en dernier (ni urgent, ni fiable à re-vérifier)."""
+    try:
+        coup_envoi = datetime.fromisoformat(match["date"].replace("Z", "+00:00"))
+    except Exception:
+        return float("inf")
+    delta_minutes = (coup_envoi - datetime.now(timezone.utc)).total_seconds() / 60
+    return delta_minutes if delta_minutes >= -180 else float("inf")
+
+
+async def _verifier_un_match(match: Dict[str, Any]) -> bool:
+    """Réutilise le cache BeSoccer existant (get_team_stats, TTL 6h
+    succès / 1h échec) — une équipe déjà vue pour un autre match du jour
+    ne redéclenche aucune requête HTTP supplémentaire."""
+    stats1 = await besoccer.get_team_stats(match["equipe1"])
+    stats2 = await besoccer.get_team_stats(match["equipe2"])
+    return stats1 is not None and stats2 is not None
+
+
+async def verifier_disponibilite_prochains(jour_iso: str) -> None:
+    """
+    Tâche de fond (voir BackgroundTasks dans main.py) : vérifie la
+    disponibilité BeSoccer des matchs pas encore vérifiés pour ce jour,
+    en commençant par ceux dont le coup d'envoi est le plus proche.
+    Volontairement plafonnée à MAX_VERIFICATIONS_PAR_CYCLE — les matchs
+    restants seront traités lors d'un prochain appel à /matchs (chaque
+    appel relance cette tâche, donc la liste se complète progressivement
+    au fil des consultations de l'écran).
+    """
+    matchs = repo.lister_matchs_jour(jour_iso)
+    a_verifier = [m for m in matchs if m.get("donneesDisponibles") is None]
+    if not a_verifier:
+        return
+
+    a_verifier.sort(key=_minutes_avant_coup_envoi)
+    a_verifier = a_verifier[:MAX_VERIFICATIONS_PAR_CYCLE]
+
+    # ⚠️ Petits lots + pause : c'est cette prudence (déjà utilisée
+    # ailleurs dans le backend) qui protège contre un nouveau blocage.
+    taille_lot = 3
+    for i in range(0, len(a_verifier), taille_lot):
+        lot = a_verifier[i : i + taille_lot]
+        resultats = await asyncio.gather(*[_verifier_un_match(m) for m in lot])
+        for m, dispo in zip(lot, resultats):
+            repo.marquer_disponibilite_match(m["fixture_id"], dispo)
+        if i + taille_lot < len(a_verifier):
+            await asyncio.sleep(2.0)
+
+
 async def obtenir_matchs(jour: str) -> Dict[str, Any]:
     """
     jour: "today" ou "tomorrow". Renvoie la liste déjà en cache si elle a
     moins de TTL_RAFRAICHISSEMENT_MATCHS_SECONDES, sinon la reconstruit
-    (nouvelle requête API-Football + nouvelle vérification BeSoccer).
+    (nouvelle requête API-Football). La vérification BeSoccer elle-même
+    se fait à part, en tâche de fond (voir verifier_disponibilite_prochains,
+    déclenchée depuis l'endpoint /matchs dans main.py).
     """
     jour_cible = _jour_iso(0 if jour == "today" else 1)
 

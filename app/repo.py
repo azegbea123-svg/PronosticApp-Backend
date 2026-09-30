@@ -364,3 +364,18 @@ def marquer_matchs_rafraichis(jour_iso: str) -> None:
     client.collection(COLLECTION_MATCHS_JOUR_META).document(jour_iso).set(
         {"rafraichi_le": _maintenant()}
     )
+
+
+def marquer_disponibilite_match(fixture_id: int, disponible: bool) -> None:
+    """
+    Met à jour donneesDisponibles pour UN SEUL match, sans toucher au
+    reste — utilisé par la vérification BeSoccer en arrière-plan, qui
+    traite les matchs un par un (ou par petits lots), pas en un seul
+    gros batch comme enregistrer_matchs_jour.
+    """
+    client = db.get_client()
+    if not client:
+        return
+    client.collection(COLLECTION_MATCHS_JOUR).document(str(fixture_id)).update(
+        {"donneesDisponibles": disponible}
+    )

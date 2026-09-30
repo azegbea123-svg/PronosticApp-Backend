@@ -4,7 +4,7 @@ import string
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from pydantic import BaseModel
@@ -115,12 +115,19 @@ async def debug_verifier_clubs(noms: List[str], uid: str = Depends(auth.utilisat
 async def debug_api_football(
     equipe1: Optional[str] = None,
     equipe2: Optional[str] = None,
+    date: Optional[str] = None,
     uid: str = Depends(auth.utilisateur_courant),
 ):
     """
     🔧 Diagnostic (admin) — montre le quota restant (protection contre
     une nouvelle suspension) et, si equipe1/equipe2 sont fournis, teste
     la résolution d'ID et l'historique de confrontations directes.
+
+    Si `date` (format YYYY-MM-DD) est fourni, teste directement
+    get_fixtures_du_jour pour cette date — utile pour vérifier si le
+    plan gratuit API-Football restreint l'accès à la saison en cours
+    (symptôme connu : /fixtures?date=<aujourd'hui> renvoie une liste
+    vide alors qu'une date passée, elle, renvoie des matchs).
     """
     auth.exiger_admin(uid)
     from .config import CLE_API_FOOTBALL
@@ -137,6 +144,12 @@ async def debug_api_football(
         resultat["id_equipe2"] = await api_football.get_team_id(equipe2)
     if equipe1 and equipe2:
         resultat["historique_confrontations"] = await api_football.get_historique_confrontations(equipe1, equipe2)
+
+    if date:
+        fixtures = await api_football.get_fixtures_du_jour(date)
+        resultat["date_testee"] = date
+        resultat["fixtures_brutes_nombre"] = None if fixtures is None else len(fixtures)
+        resultat["fixtures_brutes_exemple"] = None if not fixtures else fixtures[:2]
 
     return resultat
 
@@ -325,20 +338,56 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
     return resultat
 
 
-@app.get("/matchs", tags=["📖 Pronostic — Infos"])
-async def lister_matchs(jour: str = "today", uid: str = Depends(auth.utilisateur_courant)):
+@app.get("/debug/fixtures", tags=["📖 Admin — Diagnostic"])
+async def debug_fixtures(jour: str = None, uid: str = Depends(auth.utilisateur_courant)):
     """
-    Liste des matchs du jour ou du lendemain (jour="today"|"tomorrow"),
-    limitée aux championnats suivis (voir CHAMPIONNATS_SUIVIS dans
-    config.py), avec `donneesDisponibles` déjà calculé pour chaque match
-    (scraping BeSoccer fait en arrière-plan lors du rafraîchissement,
-    jamais au moment où le client clique). Utilise ensuite
-    /match/analyse pour l'analyse détaillée d'un match précis — même
-    moteur, même quota de 3 analyses gratuites par jour que d'habitude.
+    🔧 Diagnostic (admin) — appelle /fixtures BRUT pour une date donnée
+    (format YYYY-MM-DD, aujourd'hui par défaut) et renvoie la réponse
+    COMPLÈTE d'API-Football, y compris le champ "errors" — normalement
+    ignoré par get_fixtures_du_jour, qui ne regarde que "response". Si
+    "response" est vide alors que "errors" contient un message (ex: une
+    restriction de plan gratuit sur la saison en cours), c'est la vraie
+    explication d'une liste de matchs vide.
+    """
+    auth.exiger_admin(uid)
+    from datetime import datetime, timezone
+    from .sources.api_football import _appeler
+
+    jour_cible = jour or datetime.now(timezone.utc).date().isoformat()
+    donnees = await _appeler("/fixtures", {"date": jour_cible})
+    return {"jour": jour_cible, "reponse_brute": donnees}
+
+
+@app.get("/matchs", tags=["📖 Pronostic — Infos"])
+async def lister_matchs(
+    jour: str = "today",
+    background_tasks: BackgroundTasks = None,
+    uid: str = Depends(auth.utilisateur_courant),
+):
+    """
+    Liste de TOUS les matchs du jour ou du lendemain (jour="today"|"tomorrow"),
+    sans filtre par championnat. `donneesDisponibles` vaut :
+      - null tant que la vérification BeSoccer n'a pas encore eu lieu
+        (l'appli doit afficher le match comme "en cours de vérification",
+        pas cliquable) ;
+      - true / false une fois vérifié.
+    Chaque appel relance une vérification en arrière-plan (voir
+    matchs.verifier_disponibilite_prochains), en priorité pour les
+    matchs dont le coup d'envoi approche, plafonnée par cycle — la
+    liste se complète donc progressivement au fil des consultations,
+    jamais d'un coup. Utilise ensuite /match/analyse pour l'analyse
+    détaillée d'un match précis — même moteur, même quota de 3 analyses
+    gratuites par jour que d'habitude.
     """
     if jour not in ("today", "tomorrow"):
         raise HTTPException(400, "jour doit être 'today' ou 'tomorrow'")
-    return await matchs_service.obtenir_matchs(jour)
+
+    resultat = await matchs_service.obtenir_matchs(jour)
+
+    if background_tasks is not None:
+        background_tasks.add_task(matchs_service.verifier_disponibilite_prochains, resultat["jour"])
+
+    return resultat
 
 
 @app.get("/debug/ligues", tags=["📖 Admin — Diagnostic"])
