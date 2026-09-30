@@ -1,6 +1,10 @@
 """
-Liste des matchs du jour / J+1 — TOUS les matchs remontés par
-API-Football, sans filtre par championnat.
+Liste des matchs du jour / J+1 — matchs remontés par football-data.org
+(voir sources/football_data.py ; remplace API-Football, compte suspendu
+en sept. 2026). ⚠️ Le plan gratuit de football-data.org ne couvre
+qu'une douzaine de grandes compétitions — "tous les matchs" veut dire
+ici "tous ceux des compétitions couvertes par ce plan", pas "tous les
+matchs du monde" comme visé initialement avec API-Football.
 
 Disponibilité des données BeSoccer : vérifiée EN ARRIÈRE-PLAN, en
 priorité pour les matchs dont le coup d'envoi approche, et plafonnée
@@ -23,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .config import TTL_RAFRAICHISSEMENT_MATCHS_SECONDES
-from .sources import api_football, besoccer
+from .sources import football_data, besoccer
 from . import repo
 
 # Nombre max de vérifications BeSoccer (équipes) par cycle en arrière-plan.
@@ -34,24 +38,25 @@ def _jour_iso(offset: int = 0) -> str:
     return (datetime.now(timezone.utc).date() + timedelta(days=offset)).isoformat()
 
 
-def _normaliser(fixture: Dict[str, Any]) -> Dict[str, Any]:
+def _normaliser(match_brut: Dict[str, Any]) -> Dict[str, Any]:
+    """Adapte le format natif football-data.org (voir sources/football_data.py)."""
     return {
-        "fixture_id": fixture["fixture"]["id"],
-        "date": fixture["fixture"]["date"],
-        "league_id": fixture["league"]["id"],
-        "league": fixture["league"]["name"],
-        "equipe1": fixture["teams"]["home"]["name"],
-        "equipe2": fixture["teams"]["away"]["name"],
+        "fixture_id": match_brut["id"],
+        "date": match_brut["utcDate"],
+        "league_id": match_brut["competition"]["id"],
+        "league": match_brut["competition"]["name"],
+        "equipe1": match_brut["homeTeam"]["name"],
+        "equipe2": match_brut["awayTeam"]["name"],
         "donneesDisponibles": None,  # None = pas encore vérifié (vérification en cours)
     }
 
 
 async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
-    fixtures = await api_football.get_fixtures_du_jour(jour_iso)
+    fixtures = await football_data.get_fixtures_du_jour(jour_iso)
     if fixtures is None:
-        # Quota API-Football épuisé, clé non configurée, ou erreur réseau
-        # : on garde ce qui est déjà en base plutôt que de renvoyer une
-        # liste vide qui ferait croire à "aucun match aujourd'hui".
+        # Quota épuisé, clé non configurée, compte suspendu, ou erreur
+        # réseau : on garde ce qui est déjà en base plutôt que de
+        # renvoyer une liste vide qui ferait croire à "aucun match".
         return repo.lister_matchs_jour(jour_iso)
 
     # On garde le statut de disponibilité déjà connu pour un match déjà
@@ -61,7 +66,10 @@ async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
 
     matchs = []
     for f in fixtures:
-        m = _normaliser(f)
+        try:
+            m = _normaliser(f)
+        except (KeyError, TypeError):
+            continue  # match mal formé côté fournisseur — on l'ignore plutôt que de planter toute la liste
         ancien = deja_connus.get(m["fixture_id"])
         if ancien and ancien.get("donneesDisponibles") is not None:
             m["donneesDisponibles"] = ancien["donneesDisponibles"]

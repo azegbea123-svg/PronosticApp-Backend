@@ -154,7 +154,33 @@ async def debug_api_football(
     return resultat
 
 
-@app.get("/debug/besoccer", tags=["📖 Admin — Diagnostic"])
+@app.get("/debug/football-data", tags=["📖 Admin — Diagnostic"])
+async def debug_football_data(date: Optional[str] = None, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Diagnostic (admin) — fournisseur actuel de la liste de matchs
+    (football-data.org), depuis que le compte API-Football est
+    suspendu. Montre le quota local restant et, si `date` est fourni
+    (YYYY-MM-DD, aujourd'hui par défaut), le nombre de matchs bruts
+    trouvés pour cette date parmi les compétitions couvertes par le
+    plan gratuit.
+    """
+    auth.exiger_admin(uid)
+    from datetime import datetime, timezone
+    from .config import CLE_FOOTBALL_DATA
+    from .sources import football_data
+
+    jour_cible = date or datetime.now(timezone.utc).date().isoformat()
+    resultat: Dict[str, Any] = {
+        "cle_configuree": bool(CLE_FOOTBALL_DATA),
+        "quota": football_data.quota_restant(),
+    }
+
+    fixtures = await football_data.get_fixtures_du_jour(jour_cible)
+    resultat["date_testee"] = jour_cible
+    resultat["matchs_bruts_nombre"] = None if fixtures is None else len(fixtures)
+    resultat["matchs_bruts_exemple"] = None if not fixtures else fixtures[:2]
+
+    return resultat
 async def debug_besoccer(equipe: str, uid: str = Depends(auth.utilisateur_courant)):
     """
     🔧 Diagnostic (admin) — montre TOUTES les variantes de slug essayées,
@@ -341,20 +367,20 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
 @app.get("/debug/fixtures", tags=["📖 Admin — Diagnostic"])
 async def debug_fixtures(jour: str = None, uid: str = Depends(auth.utilisateur_courant)):
     """
-    🔧 Diagnostic (admin) — appelle /fixtures BRUT pour une date donnée
-    (format YYYY-MM-DD, aujourd'hui par défaut) et renvoie la réponse
-    COMPLÈTE d'API-Football, y compris le champ "errors" — normalement
-    ignoré par get_fixtures_du_jour, qui ne regarde que "response". Si
-    "response" est vide alors que "errors" contient un message (ex: une
-    restriction de plan gratuit sur la saison en cours), c'est la vraie
-    explication d'une liste de matchs vide.
+    🔧 Diagnostic (admin) — appelle /matches BRUT sur football-data.org
+    pour une date donnée (format YYYY-MM-DD, aujourd'hui par défaut) et
+    renvoie la réponse COMPLÈTE, erreurs comprises (ex: 403 si le
+    compte est suspendu, 429 si le débit est dépassé, "message"
+    explicatif dans les deux cas) — contrairement à
+    get_fixtures_du_jour, qui ne garde que la liste et traite toute
+    erreur comme "pas de données" pour ne pas planter /matchs.
     """
     auth.exiger_admin(uid)
     from datetime import datetime, timezone
-    from .sources.api_football import _appeler
+    from .sources import football_data
 
     jour_cible = jour or datetime.now(timezone.utc).date().isoformat()
-    donnees = await _appeler("/fixtures", {"date": jour_cible})
+    donnees = await football_data.appel_diagnostic(jour_cible)
     return {"jour": jour_cible, "reponse_brute": donnees}
 
 

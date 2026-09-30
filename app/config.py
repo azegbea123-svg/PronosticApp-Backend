@@ -11,11 +11,15 @@ LIMITE_GRATUITE_QUOTIDIENNE = 3
 # (voir auth.py). À définir en variable d'environnement sur Render.
 MOT_DE_PASSE_ADMIN = os.environ.get("ADMIN_PASSWORD", "change-moi")
 
-# ⚠️ Clé API-Football (api-sports.io) — À définir en variable
-# d'environnement sur Render. Plan gratuit = 10 requêtes/minute, 100/jour
-# — voir sources/api_football.py pour le limiteur de débit qui protège
-# contre un nouveau blocage de compte.
+# ⚠️ Clé API-Football (api-sports.io) — compte suspendu (sept. 2026),
+# plus utilisée par matchs.py. Gardée ici au cas où le compte serait
+# réactivé un jour ; voir CLE_FOOTBALL_DATA pour le fournisseur actuel.
 CLE_API_FOOTBALL = os.environ.get("API_FOOTBALL_KEY", "")
+
+# ⚠️ Clé football-data.org (v4) — fournisseur actuel pour la liste de
+# matchs du jour (voir sources/football_data.py). Plan gratuit : ~12
+# grandes compétitions, 10 requêtes/minute.
+CLE_FOOTBALL_DATA = os.environ.get("FOOTBALL_DATA_API_KEY", "")
 
 # ==== Liste de matchs J / J+1 ====
 #
