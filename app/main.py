@@ -369,19 +369,56 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
 @app.get("/debug/fixtures", tags=["📖 Admin — Diagnostic"])
 async def debug_fixtures(jour: str = None, uid: str = Depends(auth.utilisateur_courant)):
     """
-    🔧 Diagnostic (admin) — appelle eventsday.php BRUT sur TheSportsDB
-    pour une date donnée (format YYYY-MM-DD, aujourd'hui par défaut) et
-    renvoie la réponse COMPLÈTE — contrairement à get_fixtures_du_jour,
-    qui filtre et normalise déjà, et traite toute erreur comme "pas de
-    données" pour ne pas planter /matchs.
+    🔧 Diagnostic (admin) — appelle les DEUX fournisseurs bruts (voir
+    matchs.py pour la fusion normale) pour une date donnée (format
+    YYYY-MM-DD, aujourd'hui par défaut) et renvoie leurs réponses
+    COMPLÈTES côte à côte — contrairement à /matchs, qui filtre,
+    normalise et fusionne déjà, et traite toute erreur d'un fournisseur
+    comme "pas de données de ce côté" sans planter l'autre.
+    """
+    auth.exiger_admin(uid)
+    import asyncio
+    from datetime import datetime, timezone
+    from .sources import thesportsdb, football_data
+
+    jour_cible = jour or datetime.now(timezone.utc).date().isoformat()
+    reponse_thesportsdb, reponse_football_data = await asyncio.gather(
+        thesportsdb.appel_diagnostic(jour_cible),
+        football_data.appel_diagnostic(jour_cible),
+    )
+    return {
+        "jour": jour_cible,
+        "thesportsdb": reponse_thesportsdb,
+        "football_data": reponse_football_data,
+    }
+
+
+@app.get("/debug/football-data", tags=["📖 Admin — Diagnostic"])
+async def debug_football_data(date: Optional[str] = None, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Diagnostic (admin) — fournisseur football-data.org (fonctionne en
+    parallèle de TheSportsDB, voir matchs.py). Montre le quota local
+    restant et, si `date` est fourni (YYYY-MM-DD, aujourd'hui par
+    défaut), le nombre de matchs bruts trouvés pour cette date parmi les
+    compétitions couvertes par le plan gratuit.
     """
     auth.exiger_admin(uid)
     from datetime import datetime, timezone
-    from .sources import thesportsdb
+    from .config import CLE_FOOTBALL_DATA
+    from .sources import football_data
 
-    jour_cible = jour or datetime.now(timezone.utc).date().isoformat()
-    donnees = await thesportsdb.appel_diagnostic(jour_cible)
-    return {"jour": jour_cible, "reponse_brute": donnees}
+    jour_cible = date or datetime.now(timezone.utc).date().isoformat()
+    resultat: Dict[str, Any] = {
+        "cle_configuree": bool(CLE_FOOTBALL_DATA),
+        "quota": football_data.quota_restant(),
+    }
+
+    fixtures = await football_data.get_fixtures_du_jour(jour_cible)
+    resultat["date_testee"] = jour_cible
+    resultat["matchs_bruts_nombre"] = None if fixtures is None else len(fixtures)
+    resultat["matchs_bruts_exemple"] = None if not fixtures else fixtures[:2]
+
+    return resultat
 
 
 @app.get("/matchs", tags=["📖 Pronostic — Infos"])

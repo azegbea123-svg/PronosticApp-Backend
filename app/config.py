@@ -16,23 +16,25 @@ MOT_DE_PASSE_ADMIN = os.environ.get("ADMIN_PASSWORD", "change-moi")
 # réactivé un jour ; voir CLE_FOOTBALL_DATA pour le fournisseur actuel.
 CLE_API_FOOTBALL = os.environ.get("API_FOOTBALL_KEY", "")
 
-# ⚠️ Clé football-data.org (v4) — utilisée en secours (voir
-# CLE_THESPORTSDB pour le fournisseur principal actuel). Plan gratuit :
-# ~12 grandes compétitions, 10 requêtes/minute.
+# ⚠️ Clé football-data.org (v4) — utilisée EN PARALLÈLE de TheSportsDB
+# (voir CLE_THESPORTSDB), les deux listes étant fusionnées dans
+# matchs.py. Plan gratuit : ~12 grandes compétitions, 10 requêtes/minute.
 CLE_FOOTBALL_DATA = os.environ.get("FOOTBALL_DATA_API_KEY", "")
 
-# ⚠️ Clé TheSportsDB — fournisseur actuel pour la liste de matchs du
-# jour (voir sources/thesportsdb.py), couverture bien plus large (~617
-# championnats). "3" = clé de test gratuite partagée par la communauté ;
+# ⚠️ Clé TheSportsDB — utilisée EN PARALLÈLE de football-data.org (voir
+# sources/thesportsdb.py et matchs.py), couverture plus large (~617
+# championnats) mais fiabilité de données un peu plus variable (base
+# contributive). "3" = clé de test gratuite partagée par la communauté ;
 # définis THESPORTSDB_API_KEY sur Render pour une clé personnelle
 # (patreon.com/thesportsdb) si besoin de plus de fiabilité.
 CLE_THESPORTSDB = os.environ.get("THESPORTSDB_API_KEY", "3")
 
 # ==== Liste de matchs J / J+1 ====
 #
-# /matchs affiche TOUS les matchs remontés par API-Football, sans
-# filtre par championnat. La vérification BeSoccer (disponibilité des
-# données) se fait EN AVANCE, en arrière-plan, progressivement — voir
+# /matchs fusionne les matchs de football-data.org ET de TheSportsDB
+# (voir matchs.py — appel des deux en parallèle, dédoublonnage par date
+# + équipes). La vérification BeSoccer (disponibilité des données) se
+# fait EN AVANCE, en arrière-plan, progressivement — voir
 # matchs.verifier_disponibilite_prochains et
 # MAX_VERIFICATIONS_PAR_CYCLE dans matchs.py.
 

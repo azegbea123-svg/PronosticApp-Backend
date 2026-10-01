@@ -66,7 +66,7 @@ async def _appeler(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Op
 
 def _normaliser(evt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
-        fixture_id = int(evt["idEvent"])
+        fixture_id = f"tsdb-{evt['idEvent']}"
         jour = evt["dateEvent"]
         heure = evt.get("strTime") or "00:00:00"
         date_iso = f"{jour}T{heure[:8]}Z"  # voir avertissement fuseau horaire en tête de fichier
