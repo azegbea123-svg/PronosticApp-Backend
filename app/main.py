@@ -5,6 +5,23 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
+
+
+def _resoudre_jour_debug(valeur: Optional[str]) -> str:
+    """
+    Accepte "today"/"tomorrow" (comme /matchs) en plus d'une vraie date
+    YYYY-MM-DD, pour les endpoints /debug/* — évite l'erreur en cascade
+    du 1er octobre où "today" envoyé tel quel à chaque fournisseur avait
+    fait échouer thesportsdb/football_data/livefootball d'un coup.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    aujourd_hui = datetime.now(timezone.utc).date()
+    if not valeur or valeur == "today":
+        return aujourd_hui.isoformat()
+    if valeur == "tomorrow":
+        return (aujourd_hui + timedelta(days=1)).isoformat()
+    return valeur
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from pydantic import BaseModel
@@ -167,7 +184,7 @@ async def debug_thesportsdb(date: Optional[str] = None, uid: str = Depends(auth.
     from .config import CLE_THESPORTSDB
     from .sources import thesportsdb
 
-    jour_cible = date or datetime.now(timezone.utc).date().isoformat()
+    jour_cible = _resoudre_jour_debug(date)
     resultat: Dict[str, Any] = {
         "cle_configuree": bool(CLE_THESPORTSDB),
         "cle_est_partagee": CLE_THESPORTSDB == "3",
@@ -381,7 +398,7 @@ async def debug_fixtures(jour: str = None, uid: str = Depends(auth.utilisateur_c
     from datetime import datetime, timezone
     from .sources import thesportsdb, football_data, livefootball_rapidapi, openliga
 
-    jour_cible = jour or datetime.now(timezone.utc).date().isoformat()
+    jour_cible = _resoudre_jour_debug(jour)
     reponse_thesportsdb, reponse_football_data, reponse_livefootball, reponse_openliga = await asyncio.gather(
         thesportsdb.appel_diagnostic(jour_cible),
         football_data.appel_diagnostic(jour_cible),
@@ -411,7 +428,7 @@ async def debug_football_data(date: Optional[str] = None, uid: str = Depends(aut
     from .config import CLE_FOOTBALL_DATA
     from .sources import football_data
 
-    jour_cible = date or datetime.now(timezone.utc).date().isoformat()
+    jour_cible = _resoudre_jour_debug(date)
     resultat: Dict[str, Any] = {
         "cle_configuree": bool(CLE_FOOTBALL_DATA),
         "quota": football_data.quota_restant(),
@@ -439,7 +456,7 @@ async def debug_livefootball(date: Optional[str] = None, uid: str = Depends(auth
     from .config import CLE_RAPIDAPI
     from .sources import livefootball_rapidapi
 
-    jour_cible = date or datetime.now(timezone.utc).date().isoformat()
+    jour_cible = _resoudre_jour_debug(date)
     resultat: Dict[str, Any] = {
         "cle_configuree": bool(CLE_RAPIDAPI),
         "quota": livefootball_rapidapi.quota_restant(),
@@ -465,7 +482,7 @@ async def debug_openliga(date: Optional[str] = None, uid: str = Depends(auth.uti
     from datetime import datetime, timezone
     from .sources import openliga
 
-    jour_cible = date or datetime.now(timezone.utc).date().isoformat()
+    jour_cible = _resoudre_jour_debug(date)
     fixtures = await openliga.get_fixtures_du_jour(jour_cible)
     return {
         "date_testee": jour_cible,
