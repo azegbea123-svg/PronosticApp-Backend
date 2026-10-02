@@ -16,25 +16,39 @@ MOT_DE_PASSE_ADMIN = os.environ.get("ADMIN_PASSWORD", "change-moi")
 # réactivé un jour ; voir CLE_FOOTBALL_DATA pour le fournisseur actuel.
 CLE_API_FOOTBALL = os.environ.get("API_FOOTBALL_KEY", "")
 
-# ⚠️ Clé football-data.org (v4) — utilisée EN PARALLÈLE de TheSportsDB
-# (voir CLE_THESPORTSDB), les deux listes étant fusionnées dans
-# matchs.py. Plan gratuit : ~12 grandes compétitions, 10 requêtes/minute.
+# ⚠️ Clé football-data.org (v4) — une des QUATRE sources en parallèle
+# pour la liste de matchs (voir matchs.py). Plan gratuit : ~12 grandes
+# compétitions, 10 requêtes/minute.
 CLE_FOOTBALL_DATA = os.environ.get("FOOTBALL_DATA_API_KEY", "")
 
-# ⚠️ Clé TheSportsDB — utilisée EN PARALLÈLE de football-data.org (voir
-# sources/thesportsdb.py et matchs.py), couverture plus large (~617
-# championnats) mais fiabilité de données un peu plus variable (base
-# contributive). "3" = clé de test gratuite partagée par la communauté ;
+# ⚠️ Clé TheSportsDB — une des quatre sources en parallèle, couverture
+# large (~617 championnats) mais fiabilité de données un peu plus
+# variable (base contributive). "3" = clé de test gratuite partagée ;
 # définis THESPORTSDB_API_KEY sur Render pour une clé personnelle
 # (patreon.com/thesportsdb) si besoin de plus de fiabilité.
 CLE_THESPORTSDB = os.environ.get("THESPORTSDB_API_KEY", "3")
 
+# ⚠️ Clé RapidAPI — UNE SEULE clé par compte RapidAPI, partagée entre
+# TOUTES les API auxquelles on s'abonne (pas une clé par API). Utilisée
+# ici pour free-api-live-football-data (voir
+# sources/livefootball_rapidapi.py), une des quatre sources en
+# parallèle pour la liste de matchs — large couverture mondiale, sans
+# besoin de carte bancaire (contrairement à l'API-FOOTBALL officielle
+# sur RapidAPI, abandonnée pour cette raison). Définir RAPIDAPI_KEY sur
+# Render avec la clé visible sur n'importe quelle page d'API RapidAPI
+# à laquelle on est abonné (onglet Endpoints, encadré Header Parameters).
+CLE_RAPIDAPI = os.environ.get("RAPIDAPI_KEY", "")
+
+# OpenLigaDB (sources/openliga.py) n'a pas besoin de clé — rien à
+# définir ici pour cette quatrième source.
+
 # ==== Liste de matchs J / J+1 ====
 #
-# /matchs fusionne les matchs de football-data.org ET de TheSportsDB
-# (voir matchs.py — appel des deux en parallèle, dédoublonnage par date
-# + équipes). La vérification BeSoccer (disponibilité des données) se
-# fait EN AVANCE, en arrière-plan, progressivement — voir
+# /matchs fusionne les matchs de QUATRE sources en parallèle :
+# football-data.org, TheSportsDB, API-Football/RapidAPI et OpenLigaDB
+# (voir matchs.py — appel simultané, dédoublonnage par date + équipes).
+# La vérification BeSoccer (disponibilité des données) se fait EN
+# AVANCE, en arrière-plan, progressivement — voir
 # matchs.verifier_disponibilite_prochains et
 # MAX_VERIFICATIONS_PAR_CYCLE dans matchs.py.
 

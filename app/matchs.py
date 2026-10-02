@@ -1,23 +1,32 @@
 """
-Liste des matchs du jour / J+1 — FUSION de deux fournisseurs, appelés
+Liste des matchs du jour / J+1 — FUSION de QUATRE fournisseurs, appelés
 EN PARALLÈLE (asyncio.gather) :
-  - football-data.org (sources/football_data.py) : ~12 grandes
-    compétitions seulement, mais données officielles et propres.
-  - TheSportsDB (sources/thesportsdb.py) : ~617 championnats, beaucoup
-    plus large, mais base contributive (horaires parfois imprécis).
+  - football-data.org  : ~12 grandes compétitions, données officielles propres.
+  - TheSportsDB        : ~617 championnats, large mais base contributive.
+  - API-Football/RapidAPI : ~1 236 championnats (Afrique/Asie/Amérique du
+    Sud comprises), compte RapidAPI séparé de celui suspendu sur
+    api-sports.io direct.
+  - OpenLigaDB         : football allemand uniquement, mais sans clé ni
+    limite de débit, avec un bon niveau de détail sur les divisions
+    inférieures allemandes.
 
-Un même match remonté par les deux est dédupliqué (voir _cle_dedup) —
-la version football-data.org est gardée en priorité pour ces cas-là
-(données plus propres), TheSportsDB comble les championnats que
-football-data.org ne couvre pas.
+Chaque module sources/ normalise DÉJÀ ses matchs au même format interne
+{fixture_id (préfixé par source : "fd-", "tsdb-", "rapid-", "openliga-"),
+date, league_id, league, equipe1, equipe2, donneesDisponibles=None} —
+matchs.py n'a donc qu'à fusionner, pas à re-parser chaque format brut.
 
-L'identifiant de chaque match (fixture_id) est calculé par un hash
-STABLE de (jour, équipe1, équipe2) — PAS l'id brut du fournisseur. Ça
-garantit que le même match garde le même fixture_id d'un rafraîchissement
-à l'autre même s'il change de fournisseur "gagnant" entre deux appels
-(ex: football-data.org qui a un souci un jour, TheSportsDB prend le
-relais) — sans ça, la disponibilité BeSoccer déjà vérifiée serait perdue
-à chaque changement de source.
+Un même match remonté par plusieurs sources est dédupliqué (voir
+_cle_dedup, par date + équipes normalisées). Ordre de priorité en cas de
+doublon (le dernier assigné dans la fusion l'emporte) : OpenLigaDB <
+TheSportsDB < RapidAPI < football-data.org — données officielles
+d'abord, niche en dernier recours.
+
+L'identifiant de chaque match (fixture_id) est recalculé par un hash
+STABLE de (jour, équipe1, équipe2) — jamais l'id brut d'un fournisseur.
+Ça garantit que le même match garde le même fixture_id d'un
+rafraîchissement à l'autre même s'il change de fournisseur "gagnant"
+entre deux appels — sans ça, la disponibilité BeSoccer déjà vérifiée
+serait perdue à chaque changement de source.
 
 Disponibilité des données BeSoccer : vérifiée EN ARRIÈRE-PLAN, en
 priorité pour les matchs dont le coup d'envoi approche, et plafonnée
@@ -32,10 +41,10 @@ donneesDisponibles=true (voir MatchsScreen.kt côté Android).
 import asyncio
 import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .config import TTL_RAFRAICHISSEMENT_MATCHS_SECONDES
-from .sources import thesportsdb, football_data, besoccer
+from .sources import thesportsdb, football_data, livefootball_rapidapi, openliga, besoccer
 from . import repo
 
 # Nombre max de vérifications BeSoccer (équipes) par cycle en arrière-plan.
@@ -66,60 +75,40 @@ def _fixture_id_stable(jour: str, equipe1: str, equipe2: str) -> int:
     return int(empreinte[:15], 16)  # tient largement dans un Long 64 bits côté Android
 
 
-def _normaliser_football_data(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    try:
-        jour = m["utcDate"][:10]
-        equipe1 = m["homeTeam"]["name"]
-        equipe2 = m["awayTeam"]["name"]
-        return {
-            "fixture_id": _fixture_id_stable(jour, equipe1, equipe2),
-            "date": m["utcDate"],
-            "league_id": m["competition"]["id"],
-            "league": m["competition"]["name"],
-            "equipe1": equipe1,
-            "equipe2": equipe2,
-            "donneesDisponibles": None,
-        }
-    except (KeyError, TypeError):
-        return None
-
-
-def _recalculer_id_thesportsdb(m: Dict[str, Any]) -> Dict[str, Any]:
-    """thesportsdb.py normalise déjà au format interne, mais avec son
-    PROPRE id — on le remplace ici par le hash stable commun, pour que
-    la déduplication et la conservation de la disponibilité marchent
-    pareil quel que soit le fournisseur d'origine."""
+def _recalculer_id(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Chaque module sources/ normalise déjà au format interne commun,
+    mais avec son PROPRE id préfixé — on le remplace ici par le hash
+    stable commun, pour que la déduplication et la conservation de la
+    disponibilité marchent pareil quel que soit le fournisseur d'origine."""
+    m = dict(m)
     m["fixture_id"] = _fixture_id_stable(m["date"][:10], m["equipe1"], m["equipe2"])
     return m
 
 
 async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
-    matchs_fd_bruts, matchs_tsdb = await asyncio.gather(
-        football_data.get_fixtures_du_jour(jour_iso),
+    resultats = await asyncio.gather(
+        openliga.get_fixtures_du_jour(jour_iso),
         thesportsdb.get_fixtures_du_jour(jour_iso),
+        livefootball_rapidapi.get_fixtures_du_jour(jour_iso),
+        football_data.get_fixtures_du_jour(jour_iso),
     )
+    matchs_openliga, matchs_tsdb, matchs_live, matchs_fd = resultats
+
     # Chaque fonction source renvoie None uniquement en cas d'échec
     # total (clé absente, quota, erreur réseau) — jamais en cas de
-    # liste simplement vide. Si LES DEUX échouent, on garde le cache.
-    if matchs_fd_bruts is None and matchs_tsdb is None:
+    # liste simplement vide. Si LES QUATRE échouent, on garde le cache.
+    if all(r is None for r in resultats):
         return repo.lister_matchs_jour(jour_iso)
 
     fusionnes: Dict[str, Dict[str, Any]] = {}
 
-    # TheSportsDB en premier (comble les championnats hors football-data.org)...
-    for m in matchs_tsdb or []:
-        m = _recalculer_id_thesportsdb(dict(m))
-        cle = _cle_dedup(m["date"][:10], m["equipe1"], m["equipe2"])
-        fusionnes[cle] = m
-
-    # ...puis football-data.org, qui ÉCRASE un doublon éventuel (données
-    # officielles considérées plus fiables pour les compétitions qu'il couvre).
-    for f in matchs_fd_bruts or []:
-        m = _normaliser_football_data(f)
-        if m is None:
-            continue
-        cle = _cle_dedup(m["date"][:10], m["equipe1"], m["equipe2"])
-        fusionnes[cle] = m
+    # Ordre de priorité croissante (le dernier écrase un doublon) :
+    # niche d'abord, données officielles en dernier.
+    for groupe in (matchs_openliga, matchs_tsdb, matchs_live, matchs_fd):
+        for m in groupe or []:
+            m = _recalculer_id(m)
+            cle = _cle_dedup(m["date"][:10], m["equipe1"], m["equipe2"])
+            fusionnes[cle] = m
 
     if not fusionnes:
         return repo.lister_matchs_jour(jour_iso)
@@ -191,8 +180,8 @@ async def obtenir_matchs(jour: str) -> Dict[str, Any]:
     """
     jour: "today" ou "tomorrow". Renvoie la liste déjà en cache si elle a
     moins de TTL_RAFRAICHISSEMENT_MATCHS_SECONDES, sinon la reconstruit
-    (football-data.org + TheSportsDB en parallèle). La vérification
-    BeSoccer se fait à part, en tâche de fond.
+    (quatre fournisseurs en parallèle). La vérification BeSoccer se fait
+    à part, en tâche de fond.
     """
     jour_cible = _jour_iso(0 if jour == "today" else 1)
 

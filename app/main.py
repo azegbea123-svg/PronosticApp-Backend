@@ -369,27 +369,31 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
 @app.get("/debug/fixtures", tags=["📖 Admin — Diagnostic"])
 async def debug_fixtures(jour: str = None, uid: str = Depends(auth.utilisateur_courant)):
     """
-    🔧 Diagnostic (admin) — appelle les DEUX fournisseurs bruts (voir
+    🔧 Diagnostic (admin) — appelle les QUATRE fournisseurs bruts (voir
     matchs.py pour la fusion normale) pour une date donnée (format
     YYYY-MM-DD, aujourd'hui par défaut) et renvoie leurs réponses
     COMPLÈTES côte à côte — contrairement à /matchs, qui filtre,
     normalise et fusionne déjà, et traite toute erreur d'un fournisseur
-    comme "pas de données de ce côté" sans planter l'autre.
+    comme "pas de données de ce côté" sans planter les autres.
     """
     auth.exiger_admin(uid)
     import asyncio
     from datetime import datetime, timezone
-    from .sources import thesportsdb, football_data
+    from .sources import thesportsdb, football_data, livefootball_rapidapi, openliga
 
     jour_cible = jour or datetime.now(timezone.utc).date().isoformat()
-    reponse_thesportsdb, reponse_football_data = await asyncio.gather(
+    reponse_thesportsdb, reponse_football_data, reponse_livefootball, reponse_openliga = await asyncio.gather(
         thesportsdb.appel_diagnostic(jour_cible),
         football_data.appel_diagnostic(jour_cible),
+        livefootball_rapidapi.appel_diagnostic(jour_cible),
+        openliga.appel_diagnostic(jour_cible),
     )
     return {
         "jour": jour_cible,
         "thesportsdb": reponse_thesportsdb,
         "football_data": reponse_football_data,
+        "livefootball_rapidapi": reponse_livefootball,
+        "openliga": reponse_openliga,
     }
 
 
@@ -419,6 +423,56 @@ async def debug_football_data(date: Optional[str] = None, uid: str = Depends(aut
     resultat["matchs_bruts_exemple"] = None if not fixtures else fixtures[:2]
 
     return resultat
+
+
+@app.get("/debug/livefootball", tags=["📖 Admin — Diagnostic"])
+async def debug_livefootball(date: Optional[str] = None, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Diagnostic (admin) — free-api-live-football-data via RapidAPI
+    (remplace l'API-FOOTBALL officielle, qui demandait une carte
+    bancaire même sur le plan gratuit, voir matchs.py). Montre le quota
+    local restant et, si `date` est fourni (YYYY-MM-DD, aujourd'hui par
+    défaut), le nombre de matchs bruts trouvés pour cette date.
+    """
+    auth.exiger_admin(uid)
+    from datetime import datetime, timezone
+    from .config import CLE_RAPIDAPI
+    from .sources import livefootball_rapidapi
+
+    jour_cible = date or datetime.now(timezone.utc).date().isoformat()
+    resultat: Dict[str, Any] = {
+        "cle_configuree": bool(CLE_RAPIDAPI),
+        "quota": livefootball_rapidapi.quota_restant(),
+    }
+
+    fixtures = await livefootball_rapidapi.get_fixtures_du_jour(jour_cible)
+    resultat["date_testee"] = jour_cible
+    resultat["matchs_bruts_nombre"] = None if fixtures is None else len(fixtures)
+    resultat["matchs_bruts_exemple"] = None if not fixtures else fixtures[:2]
+
+    return resultat
+
+
+@app.get("/debug/openliga", tags=["📖 Admin — Diagnostic"])
+async def debug_openliga(date: Optional[str] = None, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Diagnostic (admin) — OpenLigaDB (football allemand uniquement,
+    sans clé requise, voir matchs.py). Si `date` est fourni (YYYY-MM-DD,
+    aujourd'hui par défaut), montre le nombre de matchs trouvés pour
+    cette date parmi les championnats allemands suivis (bl1, bl2, bl3).
+    """
+    auth.exiger_admin(uid)
+    from datetime import datetime, timezone
+    from .sources import openliga
+
+    jour_cible = date or datetime.now(timezone.utc).date().isoformat()
+    fixtures = await openliga.get_fixtures_du_jour(jour_cible)
+    return {
+        "date_testee": jour_cible,
+        "championnats_suivis": list(openliga.LIGUES_SUIVIES.values()),
+        "matchs_nombre": None if fixtures is None else len(fixtures),
+        "matchs_exemple": None if not fixtures else fixtures[:2],
+    }
 
 
 @app.get("/matchs", tags=["📖 Pronostic — Infos"])
