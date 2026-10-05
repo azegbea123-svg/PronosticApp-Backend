@@ -38,6 +38,12 @@ class MatchAnalysisResponse(BaseModel):
     sourcePredictionExterne: Optional[str] = None
     probabilitePredictionExterne: Optional[float] = None
     confianceGlobale: Optional[float] = None
+    scoreConfiance: Optional[int] = None
+    niveauConfiance: Optional[str] = None
+    qualiteDonnees: Optional[Dict[str, Any]] = None
+    consensus: Optional[Dict[str, Any]] = None
+    sourcesUtilisees: List[str] = []
+    alertesAnalyse: List[str] = []
 
 class MatchDetailResponse(BaseModel):
     fixture_id: str

@@ -32,6 +32,9 @@ from pydantic import BaseModel
 from .models import MatchAnalysisRequest, MatchAnalysisResponse, MatchDetailResponse
 from .sources import sofascore, besoccer, flashscore, api_football, livefootball_rapidapi
 from .analysis import generer_pronostic
+from .consensus import odds_to_probabilities, data_quality, fuse, confidence_score
+from .v3.model_registry import get_engine, ENGINE_VERSION, ENGINE_DESCRIPTION
+from .v3.walk_forward import run as run_v3_walk_forward
 from . import db
 from . import repo
 from . import paygate
@@ -72,6 +75,46 @@ app.add_middleware(
 async def health():
     """Endpoint de santé, utile pour vérifier que le déploiement fonctionne."""
     return {"status": "ok", "service": "PronosticApp API"}
+
+@app.get("/api/health/apis", tags=["Système"])
+async def health_apis(uid: str = Depends(auth.utilisateur_courant)):
+    """Diagnostic léger des fournisseurs RapidAPI déjà configurés.
+
+    Les résultats sont mis en cache 60 s afin de ne pas transformer cette
+    route en générateur de consommation de quota. Aucun secret n'est renvoyé.
+    """
+    now = time.time()
+    cached = getattr(health_apis, "_cache", None)
+    if cached and now - cached[0] < 60:
+        return {**cached[1], "cached": True}
+    from .config import CLE_RAPIDAPI
+    result = {"overall": "DEGRADED", "checked_at": datetime.now(timezone.utc).isoformat(), "providers": {}}
+    if not CLE_RAPIDAPI:
+        result["overall"] = "DOWN"
+        result["providers"] = {"rapidapi": {"status": "AUTH_ERROR", "http_status": None}}
+    else:
+        tests = [
+            ("live_football", "https://free-api-live-football-data.p.rapidapi.com/football-popular-leagues", "free-api-live-football-data.p.rapidapi.com"),
+            ("football_prediction", "https://football-prediction-api.p.rapidapi.com/api/v2/list-markets", "football-prediction-api.p.rapidapi.com"),
+        ]
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            async def check(name, url, host):
+                t0 = time.perf_counter()
+                try:
+                    r = await client.get(url, headers={"x-rapidapi-key": CLE_RAPIDAPI, "x-rapidapi-host": host})
+                    item = {"provider": host, "status": "OK" if r.status_code == 200 else ("RATE_OR_QUOTA_LIMIT" if r.status_code == 429 else ("AUTH_ERROR" if r.status_code in (401,403) else "PROVIDER_ERROR")), "http_status": r.status_code, "latency_ms": round((time.perf_counter()-t0)*1000)}
+                    for h in ("x-ratelimit-requests-remaining", "x-ratelimit-requests-limit", "x-ratelimit-requests-reset"):
+                        if r.headers.get(h) is not None:
+                            item[h] = r.headers.get(h)
+                    return name, item
+                except Exception as e:
+                    return name, {"provider": host, "status": "NETWORK_ERROR", "http_status": None, "latency_ms": round((time.perf_counter()-t0)*1000)}
+            pairs = await asyncio.gather(*[check(*x) for x in tests])
+        result["providers"] = dict(pairs)
+        states = [x["status"] for x in result["providers"].values()]
+        result["overall"] = "OK" if all(x == "OK" for x in states) else ("DOWN" if all(x not in ("OK",) for x in states) else "DEGRADED")
+    health_apis._cache = (now, result)
+    return {**result, "cached": False}
 
 
 @app.get("/debug/db", tags=["📖 Admin — Diagnostic"])
@@ -365,7 +408,16 @@ async def _prediction_externe(equipe1: str, equipe2: str, date_iso: Optional[str
                         prob = round(probs[{"1": 0, "X": 1, "2": 2}[pred]], 3)
                 except Exception:
                     prob = None
-            resultat = {"prediction": pred, "probability": prob, "source":"Football Prediction API"}
+            probabilites_cotes = odds_to_probabilities(odds)
+            resultat = {
+                "prediction": pred,
+                "probability": prob,
+                "probabilities": probabilites_cotes,
+                "odds": odds,
+                "match_id": row.get("id"),
+                "competition": row.get("competition_name"),
+                "source": "Football Prediction API",
+            }
             _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, resultat)
             return resultat
     _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, None)
@@ -404,6 +456,9 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
         stats2_sources,
         elo_confrontation=elo_confrontation,
     )
+    resultat["_stats1"] = stats1_sources
+    resultat["_stats2"] = stats2_sources
+    resultat["_elo"] = elo_confrontation
     # Comparaison indépendante avec le moteur Football Prediction API.
     try:
         ext = await _prediction_externe(requete.equipe1, requete.equipe2)
@@ -418,16 +473,40 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
     except Exception:
         pass
 
-    # Score de confiance lisible : moyenne de la meilleure probabilité
-    # du modèle et de la probabilité externe lorsqu'elle existe.
+    # V2 PRO : fusion probabiliste prudente. La confiance n'est plus la
+    # moyenne arbitraire de deux probabilités ; elle tient compte de la
+    # qualité des données, de l'écart entre modèles et de leur accord.
     try:
-        pmax = max(
-            resultat["probabiliteVictoireEquipe1"],
-            resultat["probabiliteMatchNul"],
-            resultat["probabiliteVictoireEquipe2"],
+        q = data_quality(
+            resultat.get("_stats1"), resultat.get("_stats2"),
+            resultat.get("_elo")
         )
-        pext = resultat.get("probabilitePredictionExterne")
-        resultat["confianceGlobale"] = round((pmax + pext) / 2 if pext is not None else pmax, 3)
+        model_probs = {
+            "V1": resultat["probabiliteVictoireEquipe1"],
+            "NUL": resultat["probabiliteMatchNul"],
+            "V2": resultat["probabiliteVictoireEquipe2"],
+        }
+        ext_probs = ext.get("probabilities") if ext else None
+        consensus_probs, meta = fuse(model_probs, ext_probs, q["score"], bool(ext_probs))
+        conf = confidence_score(consensus_probs, q["score"], meta)
+        resultat["probabiliteVictoireEquipe1"] = round(consensus_probs["V1"], 3)
+        resultat["probabiliteMatchNul"] = round(consensus_probs["NUL"], 3)
+        resultat["probabiliteVictoireEquipe2"] = round(consensus_probs["V2"], 3)
+        resultat["confianceGlobale"] = round(max(consensus_probs.values()), 3)
+        resultat["scoreConfiance"] = conf["score"]
+        resultat["niveauConfiance"] = conf["niveau"]
+        resultat["qualiteDonnees"] = q
+        resultat["consensus"] = {**meta, "probabilites": {k: round(v, 3) for k, v in consensus_probs.items()}}
+        resultat["sourcesUtilisees"] = sorted(set(
+            [x.get("source") for x in (resultat.get("_stats1") or []) if isinstance(x, dict)] +
+            [x.get("source") for x in (resultat.get("_stats2") or []) if isinstance(x, dict)] +
+            ([ext.get("source")] if ext else [])
+        ) - {None})
+        resultat["alertesAnalyse"] = []
+        if q["score"] < 45:
+            resultat["alertesAnalyse"].append("Données limitées : confiance réduite.")
+        if meta.get("accord") == "FAIBLE":
+            resultat["alertesAnalyse"].append("Les modèles internes et externes divergent fortement.")
     except Exception:
         pass
 
@@ -450,6 +529,40 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
     except Exception:
         pass  # enrichissement optionnel — ne doit jamais faire échouer l'analyse principale
 
+    # ========================= V3 =========================
+    # V3 est exécuté en parallèle du moteur historique : s'il échoue,
+    # l'ancienne réponse reste disponible. Il n'ajoute aucune nouvelle
+    # clé RapidAPI et utilise uniquement les données déjà récupérées.
+    try:
+        elo1_v3 = (elo_confrontation or {}).get("elo_equipe1")
+        elo2_v3 = (elo_confrontation or {}).get("elo_equipe2")
+        ext_v3 = None
+        if ext and ext.get("probabilities"):
+            ext_v3 = ext["probabilities"]
+        v3 = get_engine().predict(
+            requete.equipe1, requete.equipe2, stats1_sources, stats2_sources,
+            elo1=elo1_v3, elo2=elo2_v3, external=ext_v3, learn=False
+        )
+        resultat["probabiliteVictoireEquipe1"] = round(v3["probabilities"]["V1"], 3)
+        resultat["probabiliteMatchNul"] = round(v3["probabilities"]["NUL"], 3)
+        resultat["probabiliteVictoireEquipe2"] = round(v3["probabilities"]["V2"], 3)
+        resultat["butsAttendusEquipe1"] = v3["expected_goals"]["home"]
+        resultat["butsAttendusEquipe2"] = v3["expected_goals"]["away"]
+        resultat["scoresProbables"] = [
+            {"score": x["score"], "probabilite": x["probability"]} for x in v3["scores"][:3]
+        ]
+        resultat["confianceGlobale"] = round(max(v3["probabilities"].values()), 3)
+        resultat["scoreConfiance"] = round(max(v3["probabilities"].values()) * 100)
+        resultat["niveauConfiance"] = "Élevée" if max(v3["probabilities"].values()) >= .60 else ("Moyenne" if max(v3["probabilities"].values()) >= .45 else "Faible")
+        resultat["qualiteDonnees"] = {"score": v3["quality"], "engine": ENGINE_VERSION}
+        resultat["consensus"] = {"engine": ENGINE_VERSION, "weights": v3["weights"], "models": v3["models"], "probabilites": v3["probabilities"], "temperature": v3["temperature"]}
+        resultat["alertesAnalyse"] = list(resultat.get("alertesAnalyse") or [])
+        if v3["no_bet"]["decision"] == "NO_BET":
+            resultat["alertesAnalyse"].append("V3 recommande NO_BET : " + "; ".join(v3["no_bet"]["reasons"]))
+        resultat["facteursCles"].append(f"Moteur {ENGINE_VERSION} : ensemble adaptatif DC + Bivarié + ELO + ML + signaux externes.")
+    except Exception as exc:
+        resultat.setdefault("alertesAnalyse", []).append("V3 indisponible temporairement : moteur historique conservé.")
+
     resultat["vip"] = est_vip
     resultat["pronosticsRestantsAujourdhui"] = pronostics_restants
 
@@ -470,6 +583,26 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
 
     return resultat
 
+
+@app.get("/debug/v3/status", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_status(uid: str = Depends(auth.utilisateur_courant)):
+    auth.exiger_admin(uid)
+    eng=get_engine()
+    return {"engine_version":ENGINE_VERSION,"description":ENGINE_DESCRIPTION,"adaptive_weights":eng.adaptive.weights(),"performance":eng.adaptive.diagnostics(),"calibration_samples":len(eng.calibration_history)}
+
+@app.get("/debug/v3/weights", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_weights(uid: str = Depends(auth.utilisateur_courant)):
+    auth.exiger_admin(uid)
+    eng=get_engine()
+    return {"engine_version":ENGINE_VERSION,"weights":eng.adaptive.weights(),"diagnostics":eng.adaptive.diagnostics()}
+
+@app.post("/debug/v3/walk-forward", tags=["✏️ Admin — Actions"])
+async def debug_v3_walk_forward(payload: Dict[str, Any], uid: str = Depends(auth.utilisateur_courant)):
+    auth.exiger_admin(uid)
+    rows=payload.get("matchs") or payload.get("matches") or []
+    if not isinstance(rows,list) or not rows:
+        raise HTTPException(400,"Le champ 'matchs' doit contenir une liste de matchs avec snapshots pré-match.")
+    return run_v3_walk_forward(rows, min_history=int(payload.get("min_history",20)), rolling=int(payload.get("rolling",0)))
 
 @app.get("/debug/fixtures", tags=["📖 Admin — Diagnostic"])
 async def debug_fixtures(jour: str = None, uid: str = Depends(auth.utilisateur_courant)):
@@ -1055,6 +1188,9 @@ async def debug_analyser_match(requete: DebugAnalyseRequest, uid: str = Depends(
         stats2_sources,
         elo_confrontation=elo_confrontation,
     )
+    resultat["_stats1"] = stats1_sources
+    resultat["_stats2"] = stats2_sources
+    resultat["_elo"] = elo_confrontation
     # Comparaison indépendante avec le moteur Football Prediction API.
     try:
         ext = await _prediction_externe(requete.equipe1, requete.equipe2)
@@ -1069,16 +1205,40 @@ async def debug_analyser_match(requete: DebugAnalyseRequest, uid: str = Depends(
     except Exception:
         pass
 
-    # Score de confiance lisible : moyenne de la meilleure probabilité
-    # du modèle et de la probabilité externe lorsqu'elle existe.
+    # V2 PRO : fusion probabiliste prudente. La confiance n'est plus la
+    # moyenne arbitraire de deux probabilités ; elle tient compte de la
+    # qualité des données, de l'écart entre modèles et de leur accord.
     try:
-        pmax = max(
-            resultat["probabiliteVictoireEquipe1"],
-            resultat["probabiliteMatchNul"],
-            resultat["probabiliteVictoireEquipe2"],
+        q = data_quality(
+            resultat.get("_stats1"), resultat.get("_stats2"),
+            resultat.get("_elo")
         )
-        pext = resultat.get("probabilitePredictionExterne")
-        resultat["confianceGlobale"] = round((pmax + pext) / 2 if pext is not None else pmax, 3)
+        model_probs = {
+            "V1": resultat["probabiliteVictoireEquipe1"],
+            "NUL": resultat["probabiliteMatchNul"],
+            "V2": resultat["probabiliteVictoireEquipe2"],
+        }
+        ext_probs = ext.get("probabilities") if ext else None
+        consensus_probs, meta = fuse(model_probs, ext_probs, q["score"], bool(ext_probs))
+        conf = confidence_score(consensus_probs, q["score"], meta)
+        resultat["probabiliteVictoireEquipe1"] = round(consensus_probs["V1"], 3)
+        resultat["probabiliteMatchNul"] = round(consensus_probs["NUL"], 3)
+        resultat["probabiliteVictoireEquipe2"] = round(consensus_probs["V2"], 3)
+        resultat["confianceGlobale"] = round(max(consensus_probs.values()), 3)
+        resultat["scoreConfiance"] = conf["score"]
+        resultat["niveauConfiance"] = conf["niveau"]
+        resultat["qualiteDonnees"] = q
+        resultat["consensus"] = {**meta, "probabilites": {k: round(v, 3) for k, v in consensus_probs.items()}}
+        resultat["sourcesUtilisees"] = sorted(set(
+            [x.get("source") for x in (resultat.get("_stats1") or []) if isinstance(x, dict)] +
+            [x.get("source") for x in (resultat.get("_stats2") or []) if isinstance(x, dict)] +
+            ([ext.get("source")] if ext else [])
+        ) - {None})
+        resultat["alertesAnalyse"] = []
+        if q["score"] < 45:
+            resultat["alertesAnalyse"].append("Données limitées : confiance réduite.")
+        if meta.get("accord") == "FAIBLE":
+            resultat["alertesAnalyse"].append("Les modèles internes et externes divergent fortement.")
     except Exception:
         pass
 
