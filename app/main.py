@@ -66,6 +66,18 @@ async def health():
     return {"status": "ok", "service": "PronosticApp API"}
 
 
+
+@app.get("/api/health/apis", tags=["Système"])
+async def health_apis(force: bool = False, uid: str = Depends(auth.utilisateur_courant)):
+    """Teste les deux fournisseurs RapidAPI déjà configurés sur Render.
+
+    Aucun secret n'est renvoyé. Le résultat est mis en cache 60 secondes
+    afin d'éviter de consommer inutilement le quota RapidAPI.
+    """
+    auth.exiger_admin(uid)
+    from .sources import rapidapi_health
+    return await rapidapi_health.check(force=force)
+
 @app.get("/debug/db", tags=["📖 Admin — Diagnostic"])
 def debug_db(uid: str = Depends(auth.utilisateur_courant)):
     """🔧 Diagnostic (admin) : état réel de la connexion Firestore."""
