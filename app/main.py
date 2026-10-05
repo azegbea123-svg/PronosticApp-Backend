@@ -1,6 +1,7 @@
 import asyncio
 import random
 import string
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
@@ -26,8 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from pydantic import BaseModel
 
-from .models import MatchAnalysisRequest, MatchAnalysisResponse
-from .sources import sofascore, besoccer, flashscore, api_football
+from .models import MatchAnalysisRequest, MatchAnalysisResponse, MatchDetailResponse
+from .sources import sofascore, besoccer, flashscore, api_football, livefootball_rapidapi
 from .analysis import generer_pronostic
 from . import db
 from . import repo
@@ -309,6 +310,49 @@ def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
     return "NUL"
 
 
+
+async def _prediction_externe(equipe1: str, equipe2: str, date_iso: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Utilise football-prediction-api via la même clé RapidAPI.
+    Cette donnée est informative : elle ne remplace jamais notre moteur
+    Poisson/Dixon-Coles/ELO. On cherche le match dans les prédictions du jour.
+    """
+    from .config import CLE_RAPIDAPI
+    if not CLE_RAPIDAPI:
+        return None
+    from datetime import datetime, timezone
+    jour = date_iso[:10] if date_iso else datetime.now(timezone.utc).date().isoformat()
+    url = "https://football-prediction-api.p.rapidapi.com/api/v2/predictions"
+    headers = {"x-rapidapi-key": CLE_RAPIDAPI, "x-rapidapi-host": "football-prediction-api.p.rapidapi.com"}
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url, headers=headers, params={"market":"classic","iso_date":jour}, timeout=10.0)
+            if r.status_code != 200:
+                return None
+            rows = (r.json() or {}).get("data") or []
+    except Exception:
+        return None
+    def norm(x): return re.sub(r"[^a-z0-9]", "", (x or "").lower())
+    n1, n2 = norm(equipe1), norm(equipe2)
+    for row in rows:
+        if norm(row.get("home_team")) == n1 and norm(row.get("away_team")) == n2:
+            pred = row.get("prediction_per_market",{}).get("classic",{}).get("prediction") or row.get("prediction")
+            odds = row.get("odds") or row.get("prediction_per_market",{}).get("classic",{}).get("odds") or {}
+            prob = None
+            # Probabilité implicite normalisée (retire la marge en normalisant
+            # les trois issues 1/X/2). On n'assimile pas directement 1/cote
+            # à une probabilité.
+            if pred in ("1", "X", "2"):
+                try:
+                    inv = [1 / float(odds[k]) for k in ("1", "X", "2") if odds.get(k)]
+                    if len(inv) == 3:
+                        probs = [x / sum(inv) for x in inv]
+                        prob = round(probs[{"1": 0, "X": 1, "2": 2}[pred]], 3)
+                except Exception:
+                    prob = None
+            return {"prediction": pred, "probability": prob, "source":"Football Prediction API"}
+    return None
+
 @app.post("/match/analyse", response_model=MatchAnalysisResponse, tags=["✏️ Pronostic — Actions"])
 async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.utilisateur_courant)):
     est_vip = False
@@ -342,6 +386,32 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
         stats2_sources,
         elo_confrontation=elo_confrontation,
     )
+    # Comparaison indépendante avec le moteur Football Prediction API.
+    try:
+        ext = await _prediction_externe(requete.equipe1, requete.equipe2)
+        if ext:
+            resultat["predictionExterne"] = ext.get("prediction")
+            resultat["sourcePredictionExterne"] = ext.get("source")
+            resultat["probabilitePredictionExterne"] = ext.get("probability")
+            if ext.get("prediction"):
+                resultat["facteursCles"].append(
+                    f"Contrôle externe : {ext['prediction']} ({ext['source']})"
+                )
+    except Exception:
+        pass
+
+    # Score de confiance lisible : moyenne de la meilleure probabilité
+    # du modèle et de la probabilité externe lorsqu'elle existe.
+    try:
+        pmax = max(
+            resultat["probabiliteVictoireEquipe1"],
+            resultat["probabiliteMatchNul"],
+            resultat["probabiliteVictoireEquipe2"],
+        )
+        pext = resultat.get("probabilitePredictionExterne")
+        resultat["confianceGlobale"] = round((pmax + pext) / 2 if pext is not None else pmax, 3)
+    except Exception:
+        pass
 
     # Enrichissement optionnel via API-Football : historique COMPLET des
     # confrontations directes (contrairement à la détection BeSoccer, qui
@@ -491,6 +561,101 @@ async def debug_openliga(date: Optional[str] = None, uid: str = Depends(auth.uti
         "matchs_exemple": None if not fixtures else fixtures[:2],
     }
 
+
+
+@app.get("/match/detail/{fixture_id}", response_model=MatchDetailResponse, tags=["📖 Pronostic — Infos"])
+async def detail_match(fixture_id: str, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    Fiche match enrichie. Pour les matchs issus de free-api-live-football-data,
+    récupère en parallèle statut, score, statistiques, H2H et compositions.
+    Pour les autres fournisseurs, retourne au minimum l'identifiant demandé.
+    """
+    if not fixture_id.startswith("live-"):
+        raise HTTPException(404, "Les données détaillées ne sont pas disponibles pour ce fournisseur.")
+    try:
+        event_id = int(fixture_id.split("-", 1)[1])
+    except ValueError:
+        raise HTTPException(400, "fixture_id invalide")
+
+    import asyncio
+    status, score, stats, h2h, lineups, detail = await asyncio.gather(
+        livefootball_rapidapi.get_match_status(event_id),
+        livefootball_rapidapi.get_match_score(event_id),
+        livefootball_rapidapi.get_match_stats(event_id),
+        livefootball_rapidapi.get_head_to_head(event_id),
+        livefootball_rapidapi.get_lineups(event_id),
+        livefootball_rapidapi.get_match_detail(event_id),
+    )
+    base = detail or {}
+    home = (base.get("home") or {}).get("name") or "Domicile"
+    away = (base.get("away") or {}).get("name") or "Extérieur"
+    league = (base.get("league") or {}).get("name")
+    date = ((base.get("status") or {}).get("utcTime")
+            or ((base.get("time") or {}).get("utcTime")))
+    top_stats = []
+    for bloc in (stats or []):
+        for st in (bloc.get("stats") or []) if isinstance(bloc, dict) else []:
+            vals = st.get("stats") if isinstance(st, dict) else None
+            if isinstance(vals, list) and len(vals) >= 2 and vals[0] is not None and vals[1] is not None:
+                top_stats.append({
+                    "label": st.get("title") or st.get("key") or "Statistique",
+                    "home": str(vals[0]),
+                    "away": str(vals[1]),
+                })
+        if len(top_stats) >= 10:
+            break
+    h2h_matches = (h2h or {}).get("matches") if isinstance(h2h, dict) else []
+    h2h_matches = h2h_matches if isinstance(h2h_matches, list) else []
+    h2h_matches = [
+        {
+            "date": ((m.get("time") or {}).get("utcTime")),
+            "home": ((m.get("home") or {}).get("name")),
+            "away": ((m.get("away") or {}).get("name")),
+            "score": ((m.get("status") or {}).get("scoreStr")),
+            "league": ((m.get("league") or {}).get("name")),
+        }
+        for m in h2h_matches[:5]
+    ]
+    formations = {
+        "home": (lineups.get("home") or {}).get("formation"),
+        "away": (lineups.get("away") or {}).get("formation"),
+        "homeRating": (lineups.get("home") or {}).get("rating"),
+        "awayRating": (lineups.get("away") or {}).get("rating"),
+    }
+    return {
+        "fixture_id": fixture_id,
+        "event_id": event_id,
+        "date": date,
+        "league": league,
+        "equipe1": home,
+        "equipe2": away,
+        "statut": status,
+        "score": score or [],
+        "statistiques": stats or [],
+        "statistiquesTop": top_stats,
+        "confrontations": h2h,
+        "h2hRecents": h2h_matches,
+        "compositions": lineups,
+        "formations": formations,
+        "detail": base,
+    }
+
+@app.get("/live", tags=["📖 Pronostic — Infos"])
+async def matchs_en_direct(uid: str = Depends(auth.utilisateur_courant)):
+    data = await livefootball_rapidapi._get("/football-current-live")
+    return {"matchs": ((data or {}).get("response") or {}).get("matches", [])}
+
+@app.get("/ligues/populaires", tags=["📖 Pronostic — Infos"])
+async def ligues_populaires(uid: str = Depends(auth.utilisateur_courant)):
+    return {"ligues": await livefootball_rapidapi.get_popular_leagues()}
+
+@app.get("/ligues/{league_id}/classement", tags=["📖 Pronostic — Infos"])
+async def classement_ligue(league_id: int, mode: str = "all", uid: str = Depends(auth.utilisateur_courant)):
+    return {
+        "league_id": league_id,
+        "mode": mode if mode in ("all", "home", "away") else "all",
+        "classement": await livefootball_rapidapi.get_standing(league_id, mode),
+    }
 
 @app.get("/matchs", tags=["📖 Pronostic — Infos"])
 async def lister_matchs(
@@ -865,6 +1030,32 @@ async def debug_analyser_match(requete: DebugAnalyseRequest, uid: str = Depends(
         stats2_sources,
         elo_confrontation=elo_confrontation,
     )
+    # Comparaison indépendante avec le moteur Football Prediction API.
+    try:
+        ext = await _prediction_externe(requete.equipe1, requete.equipe2)
+        if ext:
+            resultat["predictionExterne"] = ext.get("prediction")
+            resultat["sourcePredictionExterne"] = ext.get("source")
+            resultat["probabilitePredictionExterne"] = ext.get("probability")
+            if ext.get("prediction"):
+                resultat["facteursCles"].append(
+                    f"Contrôle externe : {ext['prediction']} ({ext['source']})"
+                )
+    except Exception:
+        pass
+
+    # Score de confiance lisible : moyenne de la meilleure probabilité
+    # du modèle et de la probabilité externe lorsqu'elle existe.
+    try:
+        pmax = max(
+            resultat["probabiliteVictoireEquipe1"],
+            resultat["probabiliteMatchNul"],
+            resultat["probabiliteVictoireEquipe2"],
+        )
+        pext = resultat.get("probabilitePredictionExterne")
+        resultat["confianceGlobale"] = round((pmax + pext) / 2 if pext is not None else pmax, 3)
+    except Exception:
+        pass
 
     # Infos brutes en plus, utiles pour comprendre le calcul en détail
     resultat["_debug_stats1_sources"] = stats1_sources
