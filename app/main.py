@@ -2,6 +2,8 @@ import asyncio
 import random
 import string
 import re
+import math
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
@@ -51,6 +53,12 @@ app = FastAPI(
     ],
 )
 
+# Cache mémoire court pour les appels Football Prediction API. Il évite de
+# refaire exactement la même requête pour plusieurs utilisateurs/requêtes
+# rapprochées et réduit la consommation du quota RapidAPI.
+_PREDICTION_EXTERNE_CACHE: Dict[str, tuple[float, Optional[Dict[str, Any]]]] = {}
+_PREDICTION_EXTERNE_TTL = 10 * 60
+
 # CORS ouvert : simple pour un backend consommé uniquement par l'appli Android.
 app.add_middleware(
     CORSMiddleware,
@@ -65,18 +73,6 @@ async def health():
     """Endpoint de santé, utile pour vérifier que le déploiement fonctionne."""
     return {"status": "ok", "service": "PronosticApp API"}
 
-
-
-@app.get("/api/health/apis", tags=["Système"])
-async def health_apis(force: bool = False, uid: str = Depends(auth.utilisateur_courant)):
-    """Teste les deux fournisseurs RapidAPI déjà configurés sur Render.
-
-    Aucun secret n'est renvoyé. Le résultat est mis en cache 60 secondes
-    afin d'éviter de consommer inutilement le quota RapidAPI.
-    """
-    auth.exiger_admin(uid)
-    from .sources import rapidapi_health
-    return await rapidapi_health.check(force=force)
 
 @app.get("/debug/db", tags=["📖 Admin — Diagnostic"])
 def debug_db(uid: str = Depends(auth.utilisateur_courant)):
@@ -334,15 +330,22 @@ async def _prediction_externe(equipe1: str, equipe2: str, date_iso: Optional[str
         return None
     from datetime import datetime, timezone
     jour = date_iso[:10] if date_iso else datetime.now(timezone.utc).date().isoformat()
+    cache_key = f"{jour}|{equipe1.strip().lower()}|{equipe2.strip().lower()}"
+    maintenant = time.time()
+    cached = _PREDICTION_EXTERNE_CACHE.get(cache_key)
+    if cached and maintenant - cached[0] < _PREDICTION_EXTERNE_TTL:
+        return cached[1]
     url = "https://football-prediction-api.p.rapidapi.com/api/v2/predictions"
     headers = {"x-rapidapi-key": CLE_RAPIDAPI, "x-rapidapi-host": "football-prediction-api.p.rapidapi.com"}
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(url, headers=headers, params={"market":"classic","iso_date":jour}, timeout=10.0)
             if r.status_code != 200:
+                _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, None)
                 return None
             rows = (r.json() or {}).get("data") or []
     except Exception:
+        _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, None)
         return None
     def norm(x): return re.sub(r"[^a-z0-9]", "", (x or "").lower())
     n1, n2 = norm(equipe1), norm(equipe2)
@@ -362,7 +365,10 @@ async def _prediction_externe(equipe1: str, equipe2: str, date_iso: Optional[str
                         prob = round(probs[{"1": 0, "X": 1, "2": 2}[pred]], 3)
                 except Exception:
                     prob = None
-            return {"prediction": pred, "probability": prob, "source":"Football Prediction API"}
+            resultat = {"prediction": pred, "probability": prob, "source":"Football Prediction API"}
+            _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, resultat)
+            return resultat
+    _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, None)
     return None
 
 @app.post("/match/analyse", response_model=MatchAnalysisResponse, tags=["✏️ Pronostic — Actions"])
@@ -522,6 +528,13 @@ async def debug_football_data(date: Optional[str] = None, uid: str = Depends(aut
     resultat["matchs_bruts_exemple"] = None if not fixtures else fixtures[:2]
 
     return resultat
+
+
+@app.get("/debug/livefootball-circuit", tags=["📖 Admin — Diagnostic"])
+async def debug_livefootball_circuit(uid: str = Depends(auth.utilisateur_courant)):
+    """Etat du coupe-circuit local déclenché par un 429 RapidAPI Live Football."""
+    auth.exiger_admin(uid)
+    return livefootball_rapidapi.etat_rate_limit()
 
 
 @app.get("/debug/livefootball", tags=["📖 Admin — Diagnostic"])
@@ -1094,6 +1107,44 @@ class BacktestRequest(BaseModel):
     coefficient_attenuation_elo: Optional[float] = None
 
 
+def _log_loss_1x2(probs: Dict[str, float], reel: str) -> float:
+    """Log loss multiclasses, bornée pour éviter log(0)."""
+    p = max(1e-6, min(1.0, float(probs.get(reel, 0.0))))
+    return -math.log(p)
+
+
+def _brier_1x2(probs: Dict[str, float], reel: str) -> float:
+    """Brier multiclasses : plus bas = meilleur."""
+    return sum((float(probs.get(k, 0.0)) - (1.0 if k == reel else 0.0)) ** 2 for k in ("V1", "NUL", "V2"))
+
+
+def _calibration_bins(details: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Calibration simple par probabilité du résultat effectivement prédit."""
+    bins = []
+    bornes = [(0.50, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]
+    for bas, haut in bornes:
+        lignes = []
+        for d in details:
+            if d.get("erreur") or not d.get("probabilites"):
+                continue
+            probs = d["probabilites"]
+            pred = d.get("predit")
+            p = float(probs.get(pred, 0.0))
+            if bas <= p < haut:
+                lignes.append(d)
+        n = len(lignes)
+        if n:
+            succes = sum(1 for d in lignes if d.get("correct"))
+            confiance_moyenne = sum(float(d["probabilites"][d["predit"]]) for d in lignes) / n
+            bins.append({
+                "intervalle": f"{int(bas*100)}-{int((haut if haut < 1.01 else 1.0)*100)}%",
+                "echantillon": n,
+                "confiance_moyenne": round(confiance_moyenne, 3),
+                "reussite_reelle": round(succes / n, 3),
+            })
+    return bins
+
+
 @app.post("/debug/backtest", tags=["✏️ Admin — Actions"])
 async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utilisateur_courant)):
     """
@@ -1176,6 +1227,10 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
             "resultatReel": m.resultatReel,
             "correct": predit == m.resultatReel,
         }
+        detail["metriques_probabilistes"] = {
+            "brier_1x2": round(_brier_1x2(detail["probabilites"], m.resultatReel), 5),
+            "log_loss_1x2": round(_log_loss_1x2(detail["probabilites"], m.resultatReel), 5),
+        }
 
         # Vérification BTTS/over-under, uniquement si le score exact a
         # été fourni (sinon on ne peut tout simplement pas savoir).
@@ -1230,6 +1285,10 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
                 "taux_reussite": round(corrects_marche / len(avec_score), 3),
             }
 
+    metriques = [d["metriques_probabilistes"] for d in details if "metriques_probabilistes" in d]
+    brier_moyen = sum(m["brier_1x2"] for m in metriques) / len(metriques) if metriques else None
+    log_loss_moyen = sum(m["log_loss_1x2"] for m in metriques) / len(metriques) if metriques else None
+
     return {
         "parametres_utilises": {
             "rho_dixon_coles": rho,
@@ -1242,6 +1301,12 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
         "corrects_1x2": corrects_1x2,
         "taux_reussite_1x2": round(corrects_1x2 / total_valides, 3) if total_valides > 0 else None,
         "stats_marches_avances": stats_marches,
+        "metriques_probabilistes": {
+            "brier_moyen_1x2": round(brier_moyen, 5) if brier_moyen is not None else None,
+            "log_loss_moyen_1x2": round(log_loss_moyen, 5) if log_loss_moyen is not None else None,
+            "calibration": _calibration_bins(details),
+            "lecture": "Brier et Log Loss : plus bas = meilleur. La calibration compare la confiance affichee a la reussite reelle.",
+        },
         "details": details,
     }
 

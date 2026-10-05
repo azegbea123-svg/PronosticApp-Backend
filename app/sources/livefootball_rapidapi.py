@@ -15,6 +15,7 @@ Toutes les fonctions échouent proprement (None/[]) afin qu'une source
 optionnelle ne bloque jamais le moteur principal.
 """
 import time
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 import httpx
 from ..config import CLE_RAPIDAPI
@@ -28,13 +29,32 @@ HEADERS = {
 _MAX_APPELS_PAR_MINUTE = 8
 _horodatages_appels: List[float] = []
 
+# Coupe-circuit local : après un 429 RapidAPI, on évite de renvoyer
+# immédiatement des requêtes qui échoueront encore. La durée exacte de
+# réinitialisation reste celle annoncée par RapidAPI via ses headers ;
+# ce délai local est seulement une protection anti-boucle.
+_COOLDOWN_429_SECONDES = 15 * 60
+_rate_limited_jusqua = 0.0
+_dernier_429: Optional[Dict[str, Any]] = None
+
 def _peut_appeler() -> bool:
     maintenant = time.time()
+    if maintenant < _rate_limited_jusqua:
+        return False
     _horodatages_appels[:] = [t for t in _horodatages_appels if maintenant - t < 60]
     return len(_horodatages_appels) < _MAX_APPELS_PAR_MINUTE
 
 def _enregistrer_appel() -> None:
     _horodatages_appels.append(time.time())
+
+def etat_rate_limit() -> Dict[str, Any]:
+    maintenant = time.time()
+    restant = max(0, int(_rate_limited_jusqua - maintenant))
+    return {
+        "bloque_localement": restant > 0,
+        "secondes_cooldown_local_restantes": restant,
+        "dernier_429": _dernier_429,
+    }
 
 def quota_restant() -> Dict[str, int]:
     maintenant = time.time()
@@ -45,13 +65,28 @@ def quota_restant() -> Dict[str, int]:
     }
 
 async def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    global _rate_limited_jusqua, _dernier_429
     if not CLE_RAPIDAPI or not _peut_appeler():
         return None
     _enregistrer_appel()
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(f"{BASE_URL}{path}", headers=HEADERS,
-                                 params=params or {}, timeout=15.0)
+            r = await client.get(
+                f"{BASE_URL}{path}",
+                headers=HEADERS,
+                params=params or {},
+                timeout=15.0,
+            )
+            if r.status_code == 429:
+                _rate_limited_jusqua = time.time() + _COOLDOWN_429_SECONDES
+                _dernier_429 = {
+                    "http_status": 429,
+                    "x_ratelimit_requests_remaining": r.headers.get("x-ratelimit-requests-remaining"),
+                    "x_ratelimit_requests_limit": r.headers.get("x-ratelimit-requests-limit"),
+                    "x_ratelimit_requests_reset": r.headers.get("x-ratelimit-requests-reset"),
+                    "detecte_le": datetime.now(timezone.utc).isoformat(),
+                }
+                return None
             if r.status_code != 200:
                 return None
             return r.json()

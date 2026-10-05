@@ -38,6 +38,9 @@ CLE_THESPORTSDB = os.environ.get("THESPORTSDB_API_KEY", "3")
 # Render avec la clé visible sur n'importe quelle page d'API RapidAPI
 # à laquelle on est abonné (onglet Endpoints, encadré Header Parameters).
 CLE_RAPIDAPI = os.environ.get("RAPIDAPI_KEY", "")
+# Compatibilité avec l’ancien module API-Football via RapidAPI : une seule
+# variable Render doit piloter toutes les API RapidAPI du projet.
+CLE_RAPIDAPI_FOOTBALL = CLE_RAPIDAPI
 
 # OpenLigaDB (sources/openliga.py) n'a pas besoin de clé — rien à
 # définir ici pour cette quatrième source.

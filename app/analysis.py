@@ -141,6 +141,30 @@ def _fusionner_stats(stats_sources: List[Dict[str, Any]]) -> Optional[Dict[str, 
     }
 
 
+def _dedoublonner_matchs_detail(matchs_detail: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Évite qu'un même match historique soit compté plusieurs fois.
+
+    Les sources ne fournissent pas toutes un identifiant universel. On
+    construit donc une clé stable à partir de l'adversaire, du contexte
+    domicile/extérieur, du score et de la date approximative lorsqu'elle
+    existe. Si aucun identifiant suffisamment précis n'est disponible, le
+    match est conservé plutôt que supprimé à tort.
+    """
+    vus = set()
+    uniques: List[Dict[str, Any]] = []
+    for m in matchs_detail:
+        adversaire = m.get("adversaire_slug")
+        jour = m.get("jour_annee_approx")
+        domicile = m.get("domicile")
+        if adversaire and jour is not None:
+            cle = (adversaire, domicile, jour, m.get("buts_pour"), m.get("buts_contre"))
+            if cle in vus:
+                continue
+            vus.add(cle)
+        uniques.append(m)
+    return uniques
+
+
 def _stats_ponderees_depuis_detail(matchs_detail: List[Dict[str, Any]]) -> Tuple[float, float, float]:
     """
     Calcule les buts marqués/encaissés en pondérant chaque match par son
@@ -153,6 +177,7 @@ def _stats_ponderees_depuis_detail(matchs_detail: List[Dict[str, Any]]) -> Tuple
     effective" — à la fois pour le lissage ci-dessous et pour doser la
     confiance à accorder à la forme récente face à l'ELO (voir plus bas).
     """
+    matchs_detail = _dedoublonner_matchs_detail(matchs_detail)
     poids_total = 0.0
     marques_pond = 0.0
     encaisses_pond = 0.0
@@ -477,7 +502,7 @@ def _choisir_stats_contexte(stats_globales: Optional[Dict[str, Any]], domicile: 
         return None
 
     matchs_detail = stats_globales.get("matchs_detail") or []
-    filtres = [m for m in matchs_detail if m.get("domicile") == domicile]
+    filtres = _dedoublonner_matchs_detail([m for m in matchs_detail if m.get("domicile") == domicile])
 
     if not filtres:
         return stats_globales  # repli : pas assez de données contextuelles
