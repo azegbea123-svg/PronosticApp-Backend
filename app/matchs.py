@@ -1,5 +1,5 @@
 """
-Liste des matchs du jour / J+1 — FUSION de QUATRE fournisseurs, appelés
+Liste des matchs du jour / J+1 — FUSION de CINQ fournisseurs, appelés
 EN PARALLÈLE (asyncio.gather) :
   - football-data.org  : ~12 grandes compétitions, données officielles propres.
   - TheSportsDB        : ~617 championnats, large mais base contributive.
@@ -9,6 +9,8 @@ EN PARALLÈLE (asyncio.gather) :
   - OpenLigaDB         : football allemand uniquement, mais sans clé ni
     limite de débit, avec un bon niveau de détail sur les divisions
     inférieures allemandes.
+  - SportAPI7          : calendrier mondial via scheduled-events/{date};
+    le détail /event/{id} est disponible à la demande.
 
 Chaque module sources/ normalise DÉJÀ ses matchs au même format interne
 {fixture_id (préfixé par source : "fd-", "tsdb-", "rapid-", "openliga-"),
@@ -44,7 +46,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from .config import TTL_RAFRAICHISSEMENT_MATCHS_SECONDES
-from .sources import thesportsdb, football_data, livefootball_rapidapi, openliga, besoccer
+from .sources import thesportsdb, football_data, livefootball_rapidapi, openliga, besoccer, sportapi7
 from .v3 import source_probe
 from . import repo
 
@@ -92,8 +94,9 @@ async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
         thesportsdb.get_fixtures_du_jour(jour_iso),
         livefootball_rapidapi.get_fixtures_du_jour(jour_iso),
         football_data.get_fixtures_du_jour(jour_iso),
+        sportapi7.get_fixtures_du_jour(jour_iso),
     )
-    matchs_openliga, matchs_tsdb, matchs_live, matchs_fd = resultats
+    matchs_openliga, matchs_tsdb, matchs_live, matchs_fd, matchs_sportapi7 = resultats
 
     # Sources RapidAPI supplémentaires activées depuis Swagger.
     # Elles sont appelées séparément et leurs données sont filtrées par

@@ -608,6 +608,25 @@ async def debug_v3_sources_test_all(uid: str = Depends(auth.utilisateur_courant)
     return await source_probe.tester_toutes_sources()
 
 
+@app.get("/debug/v3/sportapi7/fixtures/{jour_iso}", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sportapi7_fixtures(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
+    """Teste directement le calendrier football SportAPI7 pour une date YYYY-MM-DD."""
+    auth.exiger_admin(uid)
+    from .sources import sportapi7
+    return {"source": "SportAPI7", "date": jour_iso, "matchs": await sportapi7.get_fixtures_du_jour(jour_iso)}
+
+
+@app.get("/debug/v3/sportapi7/event/{event_id}", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sportapi7_event(event_id: int, uid: str = Depends(auth.utilisateur_courant)):
+    """Récupère le détail d'un événement SportAPI7 sans exposer la clé RapidAPI."""
+    auth.exiger_admin(uid)
+    from .sources import sportapi7
+    detail = await sportapi7.get_event_detail(event_id)
+    if detail is None:
+        raise HTTPException(404, "Événement SportAPI7 introuvable ou indisponible")
+    return {"source": "SportAPI7", "event_id": event_id, "event": detail}
+
+
 @app.get("/debug/v3/sources/state", tags=["📖 Admin — Diagnostic"])
 async def debug_v3_sources_state(uid: str = Depends(auth.utilisateur_courant)):
     """Retourne l'état test/activation des sources sans appel externe."""

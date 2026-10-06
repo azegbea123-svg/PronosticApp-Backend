@@ -35,8 +35,9 @@ ENDPOINTS: Dict[str, Dict[str, Any]] = {
     },
     "sportapi7": {
         "name": "SportAPI7", "host": "sportapi7.p.rapidapi.com",
-        "url": "https://sportapi7.p.rapidapi.com/api/v1/event/7881945",
-        "role": "event", "fixture_capable": True,
+        "url": "https://sportapi7.p.rapidapi.com/api/v1/sport/football/scheduled-events/{date}",
+        "detail_url": "https://sportapi7.p.rapidapi.com/api/v1/event/{event_id}",
+        "role": "fixtures + event detail", "fixture_capable": True,
     },
     "allsportsapi2": {
         "name": "AllSportsAPI2", "host": "allsportsapi2.p.rapidapi.com",
@@ -137,24 +138,25 @@ def _walk(obj: Any, path: str = ""):
 
 def _extract_match(obj: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
     # Formes courantes des fournisseurs RapidAPI.
-    home = _team_name(obj.get("homeTeam")) or _team_name(obj.get("home_team")) or _team_name(obj.get("team_home")) or _team_name(obj.get("home"))
-    away = _team_name(obj.get("awayTeam")) or _team_name(obj.get("away_team")) or _team_name(obj.get("team_away")) or _team_name(obj.get("away"))
+    base = obj.get("event") if isinstance(obj.get("event"), dict) else obj
+    home = _team_name(base.get("homeTeam")) or _team_name(base.get("home_team")) or _team_name(base.get("team_home")) or _team_name(base.get("home"))
+    away = _team_name(base.get("awayTeam")) or _team_name(base.get("away_team")) or _team_name(base.get("team_away")) or _team_name(base.get("away"))
     if not home or not away:
         return None
 
-    sport = obj.get("sport") or obj.get("sportName") or obj.get("sportType")
-    tournament = obj.get("tournament") or obj.get("competition") or obj.get("league")
+    sport = base.get("sport") or base.get("sportName") or base.get("sportType")
+    tournament = base.get("tournament") or base.get("uniqueTournament") or base.get("competition") or base.get("league")
     # Si un sport explicite existe et n'est pas football, on rejette.
     if sport is not None and not _is_football(sport):
         return None
-    context = " ".join(str(x) for x in (sport, tournament, obj.get("category"), obj.get("name")) if x)
+    context = " ".join(str(x) for x in (sport, tournament, base.get("category"), base.get("name")) if x)
     if any(x in context.lower() for x in ("tennis", "basketball", "nfl", "american football", "baseball", "cricket", "hockey")) and not _is_football(sport):
         return None
 
     date = None
     for k in ("date", "start_date", "startDate", "startTimestamp", "startTimestampUtc", "utcTime", "scheduledAt", "start_at"):
-        if obj.get(k) is not None:
-            date = _date_value(obj.get(k))
+        if base.get(k) is not None:
+            date = _date_value(base.get(k))
             if date:
                 break
     if not date:
@@ -162,7 +164,7 @@ def _extract_match(obj: Dict[str, Any], path: str) -> Optional[Dict[str, Any]]:
         # injecté dans /matchs ; on le garde néanmoins pour le diagnostic.
         date = None
 
-    event_id = obj.get("id") or obj.get("eventId") or obj.get("event_id")
+    event_id = base.get("id") or base.get("eventId") or base.get("event_id")
     return {
         "event_id": event_id,
         "date": date,
@@ -223,8 +225,11 @@ async def tester_source(source_id: str, timeout: float = 12.0) -> Dict[str, Any]
 
     t0 = time.perf_counter()
     try:
+        request_url = cfg["url"]
+        if source_id == "sportapi7":
+            request_url = request_url.replace("{date}", datetime.now(timezone.utc).date().isoformat())
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.get(cfg["url"], headers=_headers(cfg["host"]))
+            response = await client.get(request_url, headers=_headers(cfg["host"]))
         latency = round((time.perf_counter() - t0) * 1000)
         item: Dict[str, Any] = {
             "source_id": source_id, "source": cfg["name"], "host": cfg["host"],
@@ -339,6 +344,10 @@ async def fetch_active_fixture_matches(jour_iso: str) -> List[List[Dict[str, Any
     for source_id in sources_actives_fixture():
         cfg = ENDPOINTS[source_id]
         try:
+            if source_id == "sportapi7":
+                from ..sources import sportapi7
+                groups.append(await sportapi7.get_fixtures_du_jour(jour_iso))
+                continue
             url = cfg["url"]
             # Les deux endpoints dont la requête fournie possède explicitement
             # une date reçoivent la date demandée par /matchs.

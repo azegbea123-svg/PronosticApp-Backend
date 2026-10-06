@@ -3,7 +3,7 @@ from .source_probe import ENDPOINTS, etat_sources
 
 SOURCES = [
     {"id":"sofascore", "name":"SofaScore RapidAPI", "host":"sofascore.p.rapidapi.com", "role":"team/form/enrichment", "status":"TESTABLE", "reason":"Endpoint teams/detail fourni; validation réelle disponible depuis Swagger."},
-    {"id":"sportapi7", "name":"SportAPI7", "host":"sportapi7.p.rapidapi.com", "role":"event", "status":"TESTABLE", "reason":"Réponse fournie précédemment incohérente; test réel nécessaire."},
+    {"id":"sportapi7", "name":"SportAPI7", "host":"sportapi7.p.rapidapi.com", "role":"fixtures + event detail", "status":"VALIDATED_EVENT_ENDPOINT", "reason":"Le connecteur V3.3 utilise scheduled-events/{date} pour la liste puis /event/{id} pour le détail. L'activation doit être confirmée par un test de la liste du jour."},
     {"id":"allsportsapi2", "name":"AllSportsAPI2", "host":"allsportsapi2.p.rapidapi.com", "role":"historical/fixtures", "status":"TESTABLE", "reason":"URL rankings ATP mais payload fourni contenant du football; validation manuelle nécessaire."},
     {"id":"odds-feed", "name":"Odds Feed", "host":"odds-feed.p.rapidapi.com", "role":"odds", "status":"TESTABLE", "reason":"La réponse fournie ne ressemblait pas à des cotes; test réel disponible."},
     {"id":"all-sport-live-stream", "name":"All Sport Live Stream", "host":"all-sport-live-stream.p.rapidapi.com", "role":"live/events", "status":"TESTABLE", "reason":"Payload fourni incohérent avec l'URL; test réel nécessaire."},
