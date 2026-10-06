@@ -1,16 +1,18 @@
-"""Connecteur SportAPI7 pour PronosticApp V3.3.
+"""Connecteur SportAPI7 - PronosticApp V3.3.2.
 
-Flux principal:
-  /sport/football/scheduled-events/{date} -> liste des matchs du jour
-  /event/{id} -> détail d'un match sélectionné
+Strategie:
+1) calendrier football du mois -> dailyStages / stageIds
+2) tentative du flux categories du jour
+3) tentative du scheduled-events historique/documente si disponible
+4) details d'evenements a la demande
 
-Le connecteur ne fait pas de boucle d'enrichissement automatique sur tous les
-matchs : les détails sont récupérés à la demande afin de préserver le quota.
+Le calendrier est utilise comme source de verite pour diagnostiquer la
+couverture du jour, sans supposer qu'un stageId est lui-meme un eventId.
 """
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -61,14 +63,14 @@ def _iso_timestamp(v: Any) -> Optional[str]:
 
 def _event_from_obj(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     event = obj.get("event") if isinstance(obj.get("event"), dict) else obj
-    home = _name(event.get("homeTeam") or event.get("home_team"))
-    away = _name(event.get("awayTeam") or event.get("away_team"))
+    home = _name(event.get("homeTeam") or event.get("home_team") or event.get("home"))
+    away = _name(event.get("awayTeam") or event.get("away_team") or event.get("away"))
     if not home or not away:
         return None
     tournament = event.get("tournament") or event.get("uniqueTournament") or event.get("league") or {}
     competition = _name(tournament) or (tournament.get("name") if isinstance(tournament, dict) else None)
     event_id = event.get("id") or event.get("eventId")
-    ts = event.get("startTimestamp") or event.get("startTimestampUtc") or event.get("startTime") or event.get("date")
+    ts = event.get("startTimestamp") or event.get("startTimestampUtc") or event.get("startTime") or event.get("date") or event.get("timeTS")
     dt = _iso_timestamp(ts)
     return {
         "fixture_id": f"sportapi7-{event_id}" if event_id is not None else None,
@@ -89,11 +91,12 @@ def _walk_events(payload: Any):
     if isinstance(payload, dict):
         if isinstance(payload.get("event"), dict):
             yield payload["event"]
-        events = payload.get("events")
-        if isinstance(events, list):
-            for x in events:
-                if isinstance(x, dict):
-                    yield x
+        for key in ("events", "matches", "scheduledEvents"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                for x in value:
+                    if isinstance(x, dict):
+                        yield x
         for v in payload.values():
             if isinstance(v, (dict, list)):
                 yield from _walk_events(v)
@@ -120,47 +123,109 @@ def normalize_events(payload: Any, target_date: Optional[str] = None) -> List[Di
     return out
 
 
-async def get_fixtures_du_jour(jour_iso: str) -> List[Dict[str, Any]]:
-    """Récupère les matchs du jour.
+def _calendar_path(jour_iso: str) -> str:
+    return f"/calendar/{jour_iso[:7]}/0/football/unique-tournaments"
 
-    Le premier appel est le flux officiel scheduled-events. Si celui-ci répond
-    correctement mais sans événements exploitables, on tente le flux catégories
-    avec timezone UTC+0. Les réponses non-200 ne sont plus silencieusement
-    transformées en succès côté diagnostic.
-    """
+
+def _extract_daily_stages(payload: Any, jour_iso: str) -> List[int]:
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("dailyStages")
+    if not isinstance(rows, list):
+        return []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("date") != jour_iso:
+            continue
+        values = row.get("stageIds") or []
+        return [int(x) for x in values if str(x).isdigit()]
+    return []
+
+
+def _extract_categories(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, dict):
+        for key in ("categories", "data", "groups"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    return []
+
+
+async def get_calendar_raw(jour_iso: str) -> Dict[str, Any]:
+    """Interroge la route calendrier prouvee dans le fichier SportAPI7 fourni."""
+    url_path = _calendar_path(jour_iso)
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+        r = await client.get(BASE + url_path, headers=_headers())
+    try:
+        payload = r.json()
+    except Exception:
+        payload = r.text[:4000]
+    return {
+        "http_status": r.status_code,
+        "date": jour_iso,
+        "url_path": url_path,
+        "content_type": r.headers.get("content-type"),
+        "rate_remaining": r.headers.get("x-ratelimit-requests-remaining"),
+        "rate_limit": r.headers.get("x-ratelimit-requests-limit"),
+        "stage_ids_for_date": _extract_daily_stages(payload, jour_iso),
+        "summary": {
+            "root_keys": list(payload.keys())[:50] if isinstance(payload, dict) else [],
+            "dailyStages_count": len(payload.get("dailyStages", [])) if isinstance(payload, dict) and isinstance(payload.get("dailyStages"), list) else 0,
+        },
+        "payload": payload,
+    }
+
+
+async def _get_json(client: httpx.AsyncClient, path: str) -> Tuple[int, Any, Dict[str, str]]:
+    r = await client.get(BASE + path, headers=_headers())
+    try:
+        payload = r.json()
+    except Exception:
+        payload = r.text[:4000]
+    return r.status_code, payload, {
+        "rate_remaining": r.headers.get("x-ratelimit-requests-remaining"),
+        "rate_limit": r.headers.get("x-ratelimit-requests-limit"),
+    }
+
+
+async def get_fixtures_du_jour(jour_iso: str) -> List[Dict[str, Any]]:
     if not CLE_RAPIDAPI:
         return []
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
-            r = await client.get(f"{BASE}/sport/football/scheduled-events/{jour_iso}", headers=_headers())
-            if r.status_code == 200:
-                matches = normalize_events(r.json(), target_date=jour_iso)
-                if matches:
-                    return matches
+            # 1. Route categorie du jour : plus ciblée et moins couteuse qu'un
+            # enrichissement evenement par evenement.
+            status, payload, _ = await _get_json(client, f"/sport/football/{jour_iso}/0/categories")
+            if status == 200:
+                out: List[Dict[str, Any]] = []
+                seen = set()
+                for cat in _extract_categories(payload):
+                    cid = cat.get("id") or cat.get("categoryId")
+                    if cid is None:
+                        continue
+                    cr_status, cr_payload, _ = await _get_json(client, f"/category/{cid}/scheduled-events/{jour_iso}")
+                    if cr_status != 200:
+                        continue
+                    for m in normalize_events(cr_payload, target_date=jour_iso):
+                        key = m.get("event_id") or (m.get("date"), m.get("equipe1"), m.get("equipe2"))
+                        if key not in seen:
+                            seen.add(key)
+                            out.append(m)
+                if out:
+                    return out
 
-            # Fallback documenté : catégories ayant des événements à cette date.
-            c = await client.get(f"{BASE}/sport/football/{jour_iso}/0/categories", headers=_headers())
-            if c.status_code != 200:
-                return []
-            payload = c.json()
-            categories = payload.get("categories", []) if isinstance(payload, dict) else []
-            out: List[Dict[str, Any]] = []
-            seen = set()
-            for cat in categories:
-                if not isinstance(cat, dict):
-                    continue
-                cid = cat.get("id")
-                if cid is None:
-                    continue
-                cr = await client.get(f"{BASE}/category/{cid}/scheduled-events/{jour_iso}", headers=_headers())
-                if cr.status_code != 200:
-                    continue
-                for m in normalize_events(cr.json(), target_date=jour_iso):
-                    key = m.get("event_id") or (m.get("date"), m.get("equipe1"), m.get("equipe2"))
-                    if key not in seen:
-                        seen.add(key)
-                        out.append(m)
-            return out
+            # 2. Fallback documente, conserve pour les abonnements qui l'exposent.
+            status, payload, _ = await _get_json(client, f"/sport/football/scheduled-events/{jour_iso}")
+            if status == 200:
+                out = normalize_events(payload, target_date=jour_iso)
+                if out:
+                    return out
+
+            # 3. Le calendrier est au minimum une preuve de couverture du jour.
+            # On ne transforme PAS les stageIds en eventIds : ce sont deux types
+            # d'identifiants differents.
+            return []
     except Exception:
         return []
 
@@ -168,10 +233,9 @@ async def get_fixtures_du_jour(jour_iso: str) -> List[Dict[str, Any]]:
 async def get_event_detail(event_id: int | str) -> Optional[Dict[str, Any]]:
     if not CLE_RAPIDAPI:
         return None
-    url = f"{BASE}/event/{event_id}"
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
-            r = await client.get(url, headers=_headers())
+            r = await client.get(f"{BASE}/event/{event_id}", headers=_headers())
         if r.status_code != 200:
             return None
         payload = r.json()
@@ -183,16 +247,17 @@ async def get_event_detail(event_id: int | str) -> Optional[Dict[str, Any]]:
 
 async def get_scheduled_events_raw(jour_iso: Optional[str] = None) -> Dict[str, Any]:
     jour_iso = jour_iso or date.today().isoformat()
-    url = f"{BASE}/sport/football/scheduled-events/{jour_iso}"
+    # Conserve l'ancien endpoint de diagnostic afin de documenter explicitement
+    # le 404 observe, sans le masquer.
+    url_path = f"/sport/football/scheduled-events/{jour_iso}"
     async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
-        r = await client.get(url, headers=_headers())
+        r = await client.get(BASE + url_path, headers=_headers())
     try:
         payload = r.json()
     except Exception:
         payload = r.text[:4000]
-    summary = {}
+    summary = {"root_keys": list(payload.keys())[:50] if isinstance(payload, dict) else []}
     if isinstance(payload, dict):
-        summary = {"root_keys": list(payload.keys())[:50]}
         for k in ("events", "matches", "scheduledEvents", "data", "categories"):
             if isinstance(payload.get(k), list):
                 summary[k + "_count"] = len(payload[k])
@@ -201,7 +266,7 @@ async def get_scheduled_events_raw(jour_iso: Optional[str] = None) -> Dict[str, 
     return {
         "http_status": r.status_code,
         "date": jour_iso,
-        "url_path": f"/sport/football/scheduled-events/{jour_iso}",
+        "url_path": url_path,
         "content_type": r.headers.get("content-type"),
         "rate_remaining": r.headers.get("x-ratelimit-requests-remaining"),
         "rate_limit": r.headers.get("x-ratelimit-requests-limit"),

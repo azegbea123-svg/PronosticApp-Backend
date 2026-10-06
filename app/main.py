@@ -616,6 +616,14 @@ async def debug_v3_sportapi7_fixtures(jour_iso: str, uid: str = Depends(auth.uti
     return {"source": "SportAPI7", "date": jour_iso, "matchs": await sportapi7.get_fixtures_du_jour(jour_iso)}
 
 
+@app.get("/debug/v3/sportapi7/calendar/{jour_iso}", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sportapi7_calendar(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
+    """Teste le calendrier football SportAPI7 et extrait les stageIds du jour."""
+    auth.exiger_admin(uid)
+    from .sources import sportapi7
+    return await sportapi7.get_calendar_raw(jour_iso)
+
+
 @app.get("/debug/v3/sportapi7/raw/{jour_iso}", tags=["📖 Admin — Diagnostic"])
 async def debug_v3_sportapi7_raw(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
     """Diagnostic brut du endpoint scheduled-events : statut, quotas et structure."""
