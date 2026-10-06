@@ -1,37 +1,20 @@
-# PronosticApp Backend V3.3.2
+# PronosticApp Backend V3.3.3 — SportAPI7 Daily Sync + Cache
 
-## Nouveautés
+Cette version ajoute une synchronisation quotidienne SportAPI7 optimisee pour le quota.
 
-- SportAPI7 devient une source de calendrier football intégrable dans `/matchs`.
-- Flux SportAPI7 : catégories du jour puis `/category/{id}/scheduled-events/{date}` ; le calendrier reconnaît `dailyUniqueTournaments[].uniqueTournamentIds`.
-- Fusion/déduplication conservée : le même match provenant de plusieurs sources ne compte qu’une seule fois.
-- Routes admin :
-  - `GET /debug/v3/sportapi7/fixtures/{jour_iso}`
-  - `GET /debug/v3/sportapi7/event/{event_id}`
-  - `GET /debug/v3/source/{source_id}/test`
-  - `GET /debug/v3/sources/test-all`
-  - `GET /debug/v3/sources/state`
-  - `POST /debug/v3/source/{source_id}/activate`
-  - `POST /debug/v3/source/{source_id}/deactivate`
-
-## Activation
-
-L’état d’activation reste en mémoire du processus Render. SportAPI7 n’est pas forcé en production simplement par la présence du connecteur : il doit être testé puis activé depuis les routes admin.
+## Strategie
+- 1 appel calendrier pour identifier les tournois actifs du jour.
+- 1 appel categories pour obtenir les categories football et leur nombre de matchs.
+- Selection intelligente de categories avec un plafond de 35 appels.
+- Chaque endpoint `/category/{id}/scheduled-events/{date}` peut retourner plusieurs matchs.
+- Deduplication par `event_id`, puis date/equipes.
+- Aucun appel `/event/{id}` pendant la synchronisation.
+- Le detail d'un match reste disponible a la demande.
 
 ## Quota
+Le plafond de 35 categories laisse une marge apres les 2 appels de pilotage et avant la limite observee de 50 requetes.
 
-Le test de toutes les sources consomme des requêtes RapidAPI. Préférer le test individuel. Le calendrier SportAPI7 est utilisé pour la liste des matchs et le détail d’un match est récupéré uniquement à la demande.
+## Diagnostic
+`GET /debug/v3/sportapi7/sync/{jour_iso}` synchronise et enregistre la journee dans Firestore `matchs_jour`.
 
-## Vérification locale
-
-`python -m compileall -q app` doit terminer sans erreur.
-
-
-## Correctif V3.3.2
-
-Le calendrier réel observé renvoie `dailyUniqueTournaments[].uniqueTournamentIds`. Le diagnostic expose désormais les deux formats (`stageIds` et `uniqueTournamentIds`).
-
-Nouvelle route admin :
-- `GET /debug/v3/sportapi7/diagnostic/{jour_iso}`
-
-Cette route compare les statuts HTTP et la structure de `categories`, `scheduled-events` et `calendar`, sans transformer un `uniqueTournamentId` en faux `eventId`.
+`GET /matchs?jour=today` continue d'utiliser le cache existant de PronosticApp.

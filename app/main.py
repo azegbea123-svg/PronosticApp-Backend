@@ -618,18 +618,10 @@ async def debug_v3_sportapi7_fixtures(jour_iso: str, uid: str = Depends(auth.uti
 
 @app.get("/debug/v3/sportapi7/calendar/{jour_iso}", tags=["📖 Admin — Diagnostic"])
 async def debug_v3_sportapi7_calendar(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Teste le calendrier football SportAPI7 et extrait stageIds + uniqueTournamentIds du jour."""
+    """Teste le calendrier football SportAPI7 et extrait les stageIds du jour."""
     auth.exiger_admin(uid)
     from .sources import sportapi7
     return await sportapi7.get_calendar_raw(jour_iso)
-
-
-@app.get("/debug/v3/sportapi7/diagnostic/{jour_iso}", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sportapi7_diagnostic(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Diagnostic complet : catégories, scheduled-events et calendrier."""
-    auth.exiger_admin(uid)
-    from .sources import sportapi7
-    return await sportapi7.diagnostic_fixtures_du_jour(jour_iso)
 
 
 @app.get("/debug/v3/sportapi7/raw/{jour_iso}", tags=["📖 Admin — Diagnostic"])
@@ -640,44 +632,24 @@ async def debug_v3_sportapi7_raw(jour_iso: str, uid: str = Depends(auth.utilisat
     return await sportapi7.get_scheduled_events_raw(jour_iso)
 
 
-@app.get("/debug/v3/sportapi7/sync/{jour_iso}", tags=["✏️ Admin — Actions"])
-async def debug_v3_sportapi7_sync(
-    jour_iso: str,
-    max_categories: int | None = None,
-    attendre_reset: bool = True,
-    uid: str = Depends(auth.utilisateur_courant),
-):
-    """Lance la synchronisation quotidienne SportAPI7 vers le cache Firestore."""
+@app.get("/debug/v3/sportapi7/sync/{jour_iso}", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sportapi7_sync(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
+    """Synchronise la journee SportAPI7 et renvoie les statistiques de cache."""
     auth.exiger_admin(uid)
     from .sources import sportapi7
-    return await sportapi7.sync_journee(jour_iso, max_categories=max_categories, attendre_reset=attendre_reset)
-
-@app.get("/debug/v3/sportapi7/category-sample/{jour_iso}", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sportapi7_category_sample(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Teste UNE catégorie du jour et expose sa structure sans tester les 99 catégories."""
-    auth.exiger_admin(uid)
-    from .sources import sportapi7
-    info = await sportapi7.get_categories_du_jour(jour_iso)
-    cats = info.get("categories", [])
-    if not cats:
-        return {**info, "sample": None}
-    cid = sportapi7._category_id(cats[0])
-    if cid is None:
-        return {**info, "sample": {"category": cats[0], "error": "ID catégorie introuvable"}}
-    async with __import__("httpx").AsyncClient(timeout=12.0, follow_redirects=True) as client:
-        status, payload, rate = await sportapi7._get_json(client, f"/category/{cid}/scheduled-events/{jour_iso}")
+    from . import repo
+    matchs = await sportapi7.get_fixtures_du_jour(jour_iso)
+    if matchs:
+        repo.enregistrer_matchs_jour(jour_iso, matchs)
+        repo.marquer_matchs_rafraichis(jour_iso)
     return {
-        **info,
-        "sample": {
-            "category": cats[0],
-            "category_id": cid,
-            "http_status": status,
-            **rate,
-            "root_keys": list(payload.keys())[:30] if isinstance(payload, dict) else [],
-            "normalized_matches_count": len(sportapi7.normalize_events(payload, target_date=jour_iso)) if status == 200 else 0,
-            "payload": payload,
-        },
+        "source": "SportAPI7",
+        "date": jour_iso,
+        "matchs_count": len(matchs),
+        "cache_count": len(repo.lister_matchs_jour(jour_iso)),
+        "diagnostic": getattr(sportapi7.get_fixtures_du_jour, "last_diagnostic", {}),
     }
+
 
 @app.get("/debug/v3/sportapi7/event/{event_id}", tags=["📖 Admin — Diagnostic"])
 async def debug_v3_sportapi7_event(event_id: int, uid: str = Depends(auth.utilisateur_courant)):
