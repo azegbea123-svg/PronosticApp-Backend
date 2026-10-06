@@ -45,6 +45,7 @@ from typing import Any, Dict, List
 
 from .config import TTL_RAFRAICHISSEMENT_MATCHS_SECONDES
 from .sources import thesportsdb, football_data, livefootball_rapidapi, openliga, besoccer
+from .v3 import source_probe
 from . import repo
 
 # Nombre max de vérifications BeSoccer (équipes) par cycle en arrière-plan.
@@ -94,6 +95,15 @@ async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
     )
     matchs_openliga, matchs_tsdb, matchs_live, matchs_fd = resultats
 
+    # Sources RapidAPI supplémentaires activées depuis Swagger.
+    # Elles sont appelées séparément et leurs données sont filtrées par
+    # date + équipes avant d'entrer dans la fusion. Une source active qui
+    # ne retourne rien pour la date demandée n'empêche jamais les autres.
+    active_ids = source_probe.sources_actives_fixture()
+    if active_ids:
+        extra = await source_probe.fetch_active_fixture_matches(jour_iso)
+        resultats = (*resultats, *extra)
+
     # Chaque fonction source renvoie None uniquement en cas d'échec
     # total (clé absente, quota, erreur réseau) — jamais en cas de
     # liste simplement vide. Si LES QUATRE échouent, on garde le cache.
@@ -104,7 +114,7 @@ async def _rafraichir_jour(jour_iso: str) -> List[Dict[str, Any]]:
 
     # Ordre de priorité croissante (le dernier écrase un doublon) :
     # niche d'abord, données officielles en dernier.
-    for groupe in (matchs_openliga, matchs_tsdb, matchs_live, matchs_fd):
+    for groupe in resultats:
         for m in groupe or []:
             m = _recalculer_id(m)
             cle = _cle_dedup(m["date"][:10], m["equipe1"], m["equipe2"])

@@ -1,22 +1,39 @@
-"""Catalogue des endpoints fournis par l'utilisateur.
+"""Catalogue des sources V3.1 + état dynamique de test/activation."""
+from .source_probe import ENDPOINTS, etat_sources
 
-Ce registre est volontairement descriptif : il ne lance aucun appel API.
-Les endpoints dont la réponse fournie ne correspond pas à la requête sont
-placés en quarantaine jusqu'à validation, afin d'éviter de polluer le moteur.
-"""
 SOURCES = [
-    {"name":"SofaScore RapidAPI", "host":"sofascore.p.rapidapi.com", "role":"match/form", "status":"QUARANTINE_RESPONSE_MISMATCH", "reason":"teams/detail fourni retourne un objet event + pregameForm; le contrat annoncé est ambigu."},
-    {"name":"SportAPI7", "host":"sportapi7.p.rapidapi.com", "role":"match", "status":"QUARANTINE_RESPONSE_MISMATCH", "reason":"/event/7881945 fourni retourne rankings Tennis au lieu d'un event football."},
-    {"name":"AllSportsAPI2", "host":"allsportsapi2.p.rapidapi.com", "role":"historique_matchs", "status":"QUARANTINE_ENDPOINT_MISMATCH", "reason":"URL /tennis/rankings/atp mais payload fourni = matchs Football; utilisable seulement après validation du contrat réel."},
-    {"name":"Odds Feed", "host":"odds-feed.p.rapidapi.com", "role":"cotes", "status":"QUARANTINE_RESPONSE_MISMATCH", "reason":"requête events fournie mais réponse observée = catalogue des sports, pas des cotes."},
-    {"name":"All Sport Live Stream", "host":"all-sport-live-stream.p.rapidapi.com", "role":"transferts", "status":"QUARANTINE_RESPONSE_MISMATCH", "reason":"/allSportid fourni retourne des transferts, pas un flux de matchs."},
-    {"name":"FlashLive Sports", "host":"flashlive-sports.p.rapidapi.com", "role":"matchs", "status":"QUARANTINE_RESPONSE_MISMATCH", "reason":"endpoint teams/transfers fourni retourne un match NFL."},
-    {"name":"FootballData1", "host":"football-data1.p.rapidapi.com", "role":"joueurs/disciplines", "status":"QUARANTINE_RESPONSE_MISMATCH", "reason":"endpoint match/list/live fourni retourne des statistiques de joueurs."},
-    {"name":"SoccerData", "host":"soccer-data.p.rapidapi.com", "role":"discipline", "status":"PARTIAL", "reason":"réponse football cohérente, mais sans noms d'équipes dans le bloc fourni; utile uniquement comme enrichissement mappable par event id."},
-    {"name":"Football Live Score 2", "host":"football-live-score2.p.rapidapi.com", "role":"fixtures/live", "status":"UNVERIFIED", "reason":"aucun corps JSON fourni dans le fichier."},
-    {"name":"free-api-live-football-data", "host":"free-api-live-football-data.p.rapidapi.com", "role":"source principale large", "status":"RATE_LIMITED", "reason":"quota actuellement épuisé; ne pas solliciter automatiquement."},
-    {"name":"football-prediction-api", "host":"football-prediction-api.p.rapidapi.com", "role":"probabilités externes", "status":"VALIDATED", "reason":"source externe déjà intégrée au moteur."},
+    {"id":"sofascore", "name":"SofaScore RapidAPI", "host":"sofascore.p.rapidapi.com", "role":"team/form/enrichment", "status":"TESTABLE", "reason":"Endpoint teams/detail fourni; validation réelle disponible depuis Swagger."},
+    {"id":"sportapi7", "name":"SportAPI7", "host":"sportapi7.p.rapidapi.com", "role":"event", "status":"TESTABLE", "reason":"Réponse fournie précédemment incohérente; test réel nécessaire."},
+    {"id":"allsportsapi2", "name":"AllSportsAPI2", "host":"allsportsapi2.p.rapidapi.com", "role":"historical/fixtures", "status":"TESTABLE", "reason":"URL rankings ATP mais payload fourni contenant du football; validation manuelle nécessaire."},
+    {"id":"odds-feed", "name":"Odds Feed", "host":"odds-feed.p.rapidapi.com", "role":"odds", "status":"TESTABLE", "reason":"La réponse fournie ne ressemblait pas à des cotes; test réel disponible."},
+    {"id":"all-sport-live-stream", "name":"All Sport Live Stream", "host":"all-sport-live-stream.p.rapidapi.com", "role":"live/events", "status":"TESTABLE", "reason":"Payload fourni incohérent avec l'URL; test réel nécessaire."},
+    {"id":"flashlive", "name":"FlashLive Sports", "host":"flashlive-sports.p.rapidapi.com", "role":"events/transfers", "status":"TESTABLE", "reason":"Payload fourni contenait NFL; validation football obligatoire."},
+    {"id":"football-data1", "name":"FootballData1", "host":"football-data1.p.rapidapi.com", "role":"fixtures/live", "status":"TESTABLE", "reason":"Payload fourni ressemblait à des statistiques joueurs; test réel nécessaire."},
+    {"id":"soccer-data", "name":"SoccerData", "host":"soccer-data.p.rapidapi.com", "role":"discipline", "status":"TESTABLE", "reason":"Réponse football avec identifiants d'événements; utile après test de mappage."},
+    {"id":"football-live-score2", "name":"Football Live Score 2", "host":"football-live-score2.p.rapidapi.com", "role":"fixtures/live", "status":"TESTABLE", "reason":"Réponse non vérifiée dans le fichier fourni."},
+    {"id":"free-api-live-football-data", "name":"free-api-live-football-data", "host":"free-api-live-football-data.p.rapidapi.com", "role":"source principale large", "status":"RATE_LIMITED", "reason":"Source existante; le quota observé était épuisé."},
+    {"id":"football-prediction-api", "name":"football-prediction-api", "host":"football-prediction-api.p.rapidapi.com", "role":"probabilités externes", "status":"VALIDATED", "reason":"Source externe déjà intégrée au moteur."},
 ]
 
 def catalogue():
-    return {"sources": SOURCES, "safe_to_auto_call": [s["name"] for s in SOURCES if s["status"] in ("VALIDATED", "PARTIAL")], "no_live_test_required": True}
+    dynamic = {x["source_id"]: x for x in etat_sources()["sources"]}
+    out = []
+    for src in SOURCES:
+        d = dynamic.get(src.get("id"), {})
+        item = dict(src)
+        item["active"] = bool(d.get("active", False))
+        item["last_test"] = d.get("last_test")
+        item["fixture_capable"] = d.get("fixture_capable", False)
+        out.append(item)
+    return {
+        "sources": out,
+        "safe_to_auto_call": [s["id"] for s in out if s.get("active")],
+        "live_test_routes": [
+            "/debug/v3/source/{source_id}/test",
+            "/debug/v3/sources/test-all",
+            "/debug/v3/sources/state",
+            "/debug/v3/source/{source_id}/activate",
+            "/debug/v3/source/{source_id}/deactivate",
+        ],
+        "activation_note": "Activation est en mémoire du processus et peut être réinitialisée après redémarrage/redéploiement Render.",
+    }

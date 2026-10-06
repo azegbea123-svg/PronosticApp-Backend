@@ -42,3 +42,28 @@ Cette version ajoute une couche de provenance/dédoublonnage dans `app/v3/source
 Les réponses fournies ont été inspectées avant activation. Plusieurs couples endpoint/réponse sont incohérents (ex. endpoint Tennis renvoyant du Football, endpoint transfers renvoyant du NFL, endpoint events renvoyant un catalogue de sports). Ils sont donc **en quarantaine** et ne sont pas appelés automatiquement. Cela protège le quota RapidAPI et empêche l'introduction de données erronées.
 
 Le catalogue est visible via `GET /debug/v3/sources` (admin) et **ne fait aucun appel API**.
+
+## V3.2 — Diagnostic et activation des sources RapidAPI
+
+Les nouvelles sources fournies peuvent maintenant être testées depuis Swagger sans
+modifier la clé `RAPIDAPI_KEY`.
+
+Routes admin :
+- `GET /debug/v3/source/{source_id}/test` : appel réel d'une source et extraction des matchs détectés.
+- `GET /debug/v3/sources/test-all` : test séquentiel de toutes les nouvelles sources (consomme du quota RapidAPI).
+- `GET /debug/v3/sources/state` : état test/activation sans appel externe.
+- `POST /debug/v3/source/{source_id}/activate?force=false` : activation après validation.
+- `POST /debug/v3/source/{source_id}/deactivate` : désactivation.
+
+Identifiants : `sofascore`, `sportapi7`, `allsportsapi2`, `odds-feed`,
+`all-sport-live-stream`, `flashlive`, `football-data1`, `soccer-data`,
+`football-live-score2`.
+
+Une source activée et déclarée `fixture_capable` peut alimenter `/matchs`. Les
+matchs sont ensuite soumis à la déduplication existante. Les sources d'enrichissement
+(team/form/discipline/odds) peuvent être activées pour diagnostic sans être
+injectées comme fixtures.
+
+L'activation est volontairement conservée en mémoire du processus Render : un
+redémarrage ou redéploiement remet les activations à zéro. Cela évite d'utiliser
+le disque éphémère Render comme pseudo-base de configuration.

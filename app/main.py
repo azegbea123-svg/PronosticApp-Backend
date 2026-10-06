@@ -35,6 +35,7 @@ from .analysis import generer_pronostic
 from .consensus import odds_to_probabilities, data_quality, fuse, confidence_score
 from .v3.model_registry import get_engine, ENGINE_VERSION, ENGINE_DESCRIPTION
 from .v3.walk_forward import run as run_v3_walk_forward
+from .v3 import source_probe
 from . import db
 from . import repo
 from . import paygate
@@ -590,6 +591,47 @@ async def debug_v3_sources(uid: str = Depends(auth.utilisateur_courant)):
     auth.exiger_admin(uid)
     from .v3.source_registry import catalogue
     return catalogue()
+
+@app.get("/debug/v3/source/{source_id}/test", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_source_test(source_id: str, uid: str = Depends(auth.utilisateur_courant)):
+    """Teste réellement UNE source RapidAPI et extrait les matchs détectés."""
+    auth.exiger_admin(uid)
+    if source_id not in source_probe.ENDPOINTS:
+        raise HTTPException(404, f"Source inconnue: {source_id}")
+    return await source_probe.tester_source(source_id)
+
+
+@app.get("/debug/v3/sources/test-all", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sources_test_all(uid: str = Depends(auth.utilisateur_courant)):
+    """Teste séquentiellement toutes les nouvelles sources RapidAPI."""
+    auth.exiger_admin(uid)
+    return await source_probe.tester_toutes_sources()
+
+
+@app.get("/debug/v3/sources/state", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sources_state(uid: str = Depends(auth.utilisateur_courant)):
+    """Retourne l'état test/activation des sources sans appel externe."""
+    auth.exiger_admin(uid)
+    return source_probe.etat_sources()
+
+
+@app.post("/debug/v3/source/{source_id}/activate", tags=["✏️ Admin — Actions"])
+async def debug_v3_source_activate(source_id: str, force: bool = False, uid: str = Depends(auth.utilisateur_courant)):
+    """Active une source après test. force=true permet une activation manuelle après inspection."""
+    auth.exiger_admin(uid)
+    if source_id not in source_probe.ENDPOINTS:
+        raise HTTPException(404, f"Source inconnue: {source_id}")
+    return source_probe.activer(source_id, force=force)
+
+
+@app.post("/debug/v3/source/{source_id}/deactivate", tags=["✏️ Admin — Actions"])
+async def debug_v3_source_deactivate(source_id: str, uid: str = Depends(auth.utilisateur_courant)):
+    """Désactive immédiatement une source."""
+    auth.exiger_admin(uid)
+    if source_id not in source_probe.ENDPOINTS:
+        raise HTTPException(404, f"Source inconnue: {source_id}")
+    return source_probe.desactiver(source_id)
+
 
 @app.get("/debug/v3/status", tags=["📖 Admin — Diagnostic"])
 async def debug_v3_status(uid: str = Depends(auth.utilisateur_courant)):
