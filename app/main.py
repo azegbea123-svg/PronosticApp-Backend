@@ -616,6 +616,14 @@ async def debug_v3_sportapi7_fixtures(jour_iso: str, uid: str = Depends(auth.uti
     return {"source": "SportAPI7", "date": jour_iso, "matchs": await sportapi7.get_fixtures_du_jour(jour_iso)}
 
 
+@app.get("/debug/v3/sportapi7/raw/{jour_iso}", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sportapi7_raw(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
+    """Diagnostic brut du endpoint scheduled-events : statut, quotas et structure."""
+    auth.exiger_admin(uid)
+    from .sources import sportapi7
+    return await sportapi7.get_scheduled_events_raw(jour_iso)
+
+
 @app.get("/debug/v3/sportapi7/event/{event_id}", tags=["📖 Admin — Diagnostic"])
 async def debug_v3_sportapi7_event(event_id: int, uid: str = Depends(auth.utilisateur_courant)):
     """Récupère le détail d'un événement SportAPI7 sans exposer la clé RapidAPI."""
