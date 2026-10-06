@@ -14,6 +14,9 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import asyncio
+import time
+
 import httpx
 
 from ..config import CLE_RAPIDAPI
@@ -193,6 +196,7 @@ async def get_calendar_raw(jour_iso: str) -> Dict[str, Any]:
         "content_type": r.headers.get("content-type"),
         "rate_remaining": r.headers.get("x-ratelimit-requests-remaining"),
         "rate_limit": r.headers.get("x-ratelimit-requests-limit"),
+        "rate_reset": r.headers.get("x-ratelimit-requests-reset"),
         "stage_ids_for_date": stage_ids,
         "unique_tournament_ids_for_date": tournament_ids,
         "summary": {
@@ -215,6 +219,7 @@ async def _get_json(client: httpx.AsyncClient, path: str) -> Tuple[int, Any, Dic
     return r.status_code, payload, {
         "rate_remaining": r.headers.get("x-ratelimit-requests-remaining"),
         "rate_limit": r.headers.get("x-ratelimit-requests-limit"),
+        "rate_reset": r.headers.get("x-ratelimit-requests-reset"),
     }
 
 
@@ -257,6 +262,184 @@ async def diagnostic_fixtures_du_jour(jour_iso: str) -> Dict[str, Any]:
         "unique_tournament_ids_count": len(cal.get("unique_tournament_ids_for_date", [])),
     }
     return result
+
+
+async def get_categories_du_jour(jour_iso: str) -> Dict[str, Any]:
+    """Retourne la liste des catégories football actives à la date demandée."""
+    path = f"/sport/football/{jour_iso}/0/categories"
+    if not CLE_RAPIDAPI:
+        return {"http_status": 0, "categories": [], "error": "RAPIDAPI_KEY non configurée"}
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+        status, payload, rate = await _get_json(client, path)
+    categories = _extract_categories(payload) if status == 200 else []
+    return {
+        "http_status": status,
+        "url_path": path,
+        **rate,
+        "categories": categories,
+        "categories_count": len(categories),
+        "root_keys": list(payload.keys())[:30] if isinstance(payload, dict) else [],
+    }
+
+
+def _category_id(cat: Dict[str, Any]) -> Optional[int]:
+    for key in ("id", "categoryId"):
+        value = cat.get(key)
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+    nested = cat.get("category")
+    if isinstance(nested, dict):
+        try:
+            return int(nested.get("id"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _rate_reset_seconds(value: Any) -> Optional[float]:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    # RapidAPI renvoie généralement un epoch UNIX. Si la valeur est trop
+    # petite, on la considère comme une durée déjà exprimée en secondes.
+    now = time.time()
+    if n > now - 60:
+        return max(0.0, n - now)
+    if 0 <= n <= 600:
+        return n
+    return None
+
+
+async def sync_journee(
+    jour_iso: str,
+    max_categories: Optional[int] = None,
+    attendre_reset: bool = True,
+) -> Dict[str, Any]:
+    """Synchronisation quotidienne SportAPI7 vers le cache Firestore.
+
+    Un seul appel HTTP côté PronosticApp orchestre les appels amont nécessaires.
+    Chaque endpoint /category/.../scheduled-events/{date} peut retourner plusieurs
+    matchs. Les détails /event/{id} ne sont donc PAS appelés pour chaque match.
+
+    Si la limite RapidAPI est atteinte, on attend le reset lorsque le header le
+    permet (sinon 60 s), puis la synchronisation reprend. Cela permet de traiter
+    les 99 catégories observées sans transformer chaque ouverture de l'application
+    en une rafale d'appels.
+    """
+    if not CLE_RAPIDAPI:
+        return {"ok": False, "error": "RAPIDAPI_KEY non configurée", "date": jour_iso}
+
+    from .. import repo
+
+    cat_info = await get_categories_du_jour(jour_iso)
+    if cat_info.get("http_status") != 200:
+        return {"ok": False, "date": jour_iso, "phase": "categories", **cat_info}
+
+    categories = cat_info.get("categories", [])
+    # Déduplication des catégories et conservation de l'ordre API.
+    seen_cat = set()
+    categories_uniques = []
+    for cat in categories:
+        cid = _category_id(cat)
+        if cid is None or cid in seen_cat:
+            continue
+        seen_cat.add(cid)
+        categories_uniques.append(cat)
+
+    if max_categories is not None:
+        categories_uniques = categories_uniques[:max(0, int(max_categories))]
+
+    matchs_existants = repo.lister_matchs_jour(jour_iso)
+    fusion = {}
+    for m in matchs_existants:
+        key = m.get("fixture_id") or (m.get("date"), m.get("equipe1"), m.get("equipe2"))
+        fusion[key] = m
+
+    categories_ok = 0
+    categories_vides = 0
+    categories_erreur = 0
+    matchs_nouveaux = 0
+    rate_remaining = cat_info.get("rate_remaining")
+    rate_reset = cat_info.get("rate_reset")
+
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+        for index, cat in enumerate(categories_uniques):
+            cid = _category_id(cat)
+            if cid is None:
+                continue
+            path = f"/category/{cid}/scheduled-events/{jour_iso}"
+            status, payload, rate = await _get_json(client, path)
+            rate_remaining = rate.get("rate_remaining") or rate_remaining
+            rate_reset = rate.get("rate_reset") or rate_reset
+
+            if status == 429:
+                if not attendre_reset:
+                    break
+                attente = _rate_reset_seconds(rate_reset) or 60.0
+                await asyncio.sleep(min(max(attente + 1.0, 1.0), 120.0))
+                status, payload, rate = await _get_json(client, path)
+                rate_remaining = rate.get("rate_remaining") or rate_remaining
+                rate_reset = rate.get("rate_reset") or rate_reset
+
+            if status != 200:
+                categories_erreur += 1
+                continue
+
+            events = normalize_events(payload, target_date=jour_iso)
+            if not events:
+                categories_vides += 1
+            else:
+                categories_ok += 1
+
+            for m in events:
+                # Identifiant stable commun à l'application, afin de pouvoir
+                # fusionner SportAPI7 avec les autres fournisseurs.
+                from ..matchs import _recalculer_id
+                m = _recalculer_id(m)
+                key = m["fixture_id"]
+                ancien = fusion.get(key)
+                if ancien and ancien.get("donneesDisponibles") is not None:
+                    m["donneesDisponibles"] = ancien["donneesDisponibles"]
+                fusion[key] = m
+                if ancien is None:
+                    matchs_nouveaux += 1
+
+            # Protection douce : si le quota est presque vide, on laisse le
+            # header de reset décider plutôt que d'émettre un appel voué au 429.
+            try:
+                remaining_int = int(rate_remaining) if rate_remaining is not None else None
+            except (TypeError, ValueError):
+                remaining_int = None
+            if remaining_int is not None and remaining_int <= 0 and index + 1 < len(categories_uniques):
+                if attendre_reset:
+                    attente = _rate_reset_seconds(rate_reset) or 60.0
+                    await asyncio.sleep(min(max(attente + 1.0, 1.0), 120.0))
+                else:
+                    break
+
+    matchs = list(fusion.values())
+    if matchs:
+        repo.enregistrer_matchs_jour(jour_iso, matchs)
+        repo.marquer_matchs_rafraichis(jour_iso)
+
+    return {
+        "ok": True,
+        "date": jour_iso,
+        "categories_disponibles": len(categories_uniques),
+        "categories_traitees": categories_ok + categories_vides + categories_erreur,
+        "categories_avec_matchs": categories_ok,
+        "categories_vides": categories_vides,
+        "categories_erreur": categories_erreur,
+        "matchs_total_cache": len(matchs),
+        "matchs_nouveaux": matchs_nouveaux,
+        "rate_remaining": rate_remaining,
+        "rate_reset": rate_reset,
+        "limite_categories": max_categories,
+    }
 
 
 async def get_fixtures_du_jour(jour_iso: str) -> List[Dict[str, Any]]:
@@ -347,6 +530,7 @@ async def get_scheduled_events_raw(jour_iso: Optional[str] = None) -> Dict[str, 
         "content_type": r.headers.get("content-type"),
         "rate_remaining": r.headers.get("x-ratelimit-requests-remaining"),
         "rate_limit": r.headers.get("x-ratelimit-requests-limit"),
+        "rate_reset": r.headers.get("x-ratelimit-requests-reset"),
         "summary": summary,
         "payload": payload,
     }

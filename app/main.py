@@ -640,6 +640,45 @@ async def debug_v3_sportapi7_raw(jour_iso: str, uid: str = Depends(auth.utilisat
     return await sportapi7.get_scheduled_events_raw(jour_iso)
 
 
+@app.get("/debug/v3/sportapi7/sync/{jour_iso}", tags=["✏️ Admin — Actions"])
+async def debug_v3_sportapi7_sync(
+    jour_iso: str,
+    max_categories: int | None = None,
+    attendre_reset: bool = True,
+    uid: str = Depends(auth.utilisateur_courant),
+):
+    """Lance la synchronisation quotidienne SportAPI7 vers le cache Firestore."""
+    auth.exiger_admin(uid)
+    from .sources import sportapi7
+    return await sportapi7.sync_journee(jour_iso, max_categories=max_categories, attendre_reset=attendre_reset)
+
+@app.get("/debug/v3/sportapi7/category-sample/{jour_iso}", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sportapi7_category_sample(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
+    """Teste UNE catégorie du jour et expose sa structure sans tester les 99 catégories."""
+    auth.exiger_admin(uid)
+    from .sources import sportapi7
+    info = await sportapi7.get_categories_du_jour(jour_iso)
+    cats = info.get("categories", [])
+    if not cats:
+        return {**info, "sample": None}
+    cid = sportapi7._category_id(cats[0])
+    if cid is None:
+        return {**info, "sample": {"category": cats[0], "error": "ID catégorie introuvable"}}
+    async with __import__("httpx").AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        status, payload, rate = await sportapi7._get_json(client, f"/category/{cid}/scheduled-events/{jour_iso}")
+    return {
+        **info,
+        "sample": {
+            "category": cats[0],
+            "category_id": cid,
+            "http_status": status,
+            **rate,
+            "root_keys": list(payload.keys())[:30] if isinstance(payload, dict) else [],
+            "normalized_matches_count": len(sportapi7.normalize_events(payload, target_date=jour_iso)) if status == 200 else 0,
+            "payload": payload,
+        },
+    }
+
 @app.get("/debug/v3/sportapi7/event/{event_id}", tags=["📖 Admin — Diagnostic"])
 async def debug_v3_sportapi7_event(event_id: int, uid: str = Depends(auth.utilisateur_courant)):
     """Récupère le détail d'un événement SportAPI7 sans exposer la clé RapidAPI."""
