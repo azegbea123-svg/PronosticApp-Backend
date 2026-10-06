@@ -3,16 +3,20 @@ from typing import Any,Dict,List,Optional
 def _stats(src):
     if not src: return None
     # Deduplicate using source-provided detail when possible.
-    details=[]; seen=set()
+    details_by_key={}; source_names=set()
     for s in src:
+        if not isinstance(s, dict): continue
+        if s.get('source'): source_names.add(s.get('source'))
         for m in s.get('matchs_detail',[]) or []:
-            key=(m.get('adversaire_slug'),m.get('domicile'),m.get('jour_annee_approx'),m.get('buts_pour'),m.get('buts_contre'))
-            if key==(None,None,None,None,None) or key not in seen:
-                details.append(m); seen.add(key)
+            if not isinstance(m, dict): continue
+            key=(m.get('adversaire_slug') or m.get('adversaire') or '', m.get('domicile'), m.get('jour_annee_approx') or m.get('date') or '', m.get('buts_pour'), m.get('buts_contre'))
+            if key not in details_by_key or len(m) > len(details_by_key[key]):
+                details_by_key[key]=m
+    details=list(details_by_key.values())
     games=len(details) or sum(int(s.get('matchs_analyses',0)) for s in src)
     gf=sum(float(m.get('buts_pour',0)) for m in details) if details else sum(float(s.get('buts_marques',0)) for s in src)
     ga=sum(float(m.get('buts_contre',0)) for m in details) if details else sum(float(s.get('buts_encaisses',0)) for s in src)
-    return {'games':games,'gf':gf,'ga':ga,'details':details,'sources':sorted(set(s.get('source','?') for s in src))}
+    return {'games':games,'gf':gf,'ga':ga,'details':details,'sources':sorted(source_names or set(s.get('source','?') for s in src)),'unique_matches':len(details)}
 
 def quality(s1,s2,elo_available=False,market_available=False):
     a,b=_stats(s1),_stats(s2); score=0

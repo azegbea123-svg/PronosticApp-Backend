@@ -584,6 +584,13 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
     return resultat
 
 
+@app.get("/debug/v3/sources", tags=["📖 Admin — Diagnostic"])
+async def debug_v3_sources(uid: str = Depends(auth.utilisateur_courant)):
+    """Catalogue des sources et état de validation, sans aucun appel externe."""
+    auth.exiger_admin(uid)
+    from .v3.source_registry import catalogue
+    return catalogue()
+
 @app.get("/debug/v3/status", tags=["📖 Admin — Diagnostic"])
 async def debug_v3_status(uid: str = Depends(auth.utilisateur_courant)):
     auth.exiger_admin(uid)
