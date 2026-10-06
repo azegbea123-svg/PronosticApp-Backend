@@ -1,9 +1,9 @@
-# PronosticApp Backend V3.3
+# PronosticApp Backend V3.3.2
 
 ## Nouveautés
 
 - SportAPI7 devient une source de calendrier football intégrable dans `/matchs`.
-- Flux SportAPI7 : `scheduled-events/{date}` pour les matchs du jour, puis `/event/{id}` pour le détail à la demande.
+- Flux SportAPI7 : catégories du jour puis `/category/{id}/scheduled-events/{date}` ; le calendrier reconnaît `dailyUniqueTournaments[].uniqueTournamentIds`.
 - Fusion/déduplication conservée : le même match provenant de plusieurs sources ne compte qu’une seule fois.
 - Routes admin :
   - `GET /debug/v3/sportapi7/fixtures/{jour_iso}`
@@ -25,3 +25,13 @@ Le test de toutes les sources consomme des requêtes RapidAPI. Préférer le tes
 ## Vérification locale
 
 `python -m compileall -q app` doit terminer sans erreur.
+
+
+## Correctif V3.3.2
+
+Le calendrier réel observé renvoie `dailyUniqueTournaments[].uniqueTournamentIds`. Le diagnostic expose désormais les deux formats (`stageIds` et `uniqueTournamentIds`).
+
+Nouvelle route admin :
+- `GET /debug/v3/sportapi7/diagnostic/{jour_iso}`
+
+Cette route compare les statuts HTTP et la structure de `categories`, `scheduled-events` et `calendar`, sans transformer un `uniqueTournamentId` en faux `eventId`.

@@ -128,6 +128,7 @@ def _calendar_path(jour_iso: str) -> str:
 
 
 def _extract_daily_stages(payload: Any, jour_iso: str) -> List[int]:
+    """Ancien format calendrier : dailyStages[].stageIds."""
     if not isinstance(payload, dict):
         return []
     rows = payload.get("dailyStages")
@@ -138,6 +139,27 @@ def _extract_daily_stages(payload: Any, jour_iso: str) -> List[int]:
             continue
         values = row.get("stageIds") or []
         return [int(x) for x in values if str(x).isdigit()]
+    return []
+
+
+def _extract_daily_unique_tournaments(payload: Any, jour_iso: str) -> List[int]:
+    """Format actuellement renvoyé : dailyUniqueTournaments[].uniqueTournamentIds."""
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("dailyUniqueTournaments")
+    if not isinstance(rows, list):
+        return []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("date") != jour_iso:
+            continue
+        values = row.get("uniqueTournamentIds") or []
+        out: List[int] = []
+        for x in values:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        return out
     return []
 
 
@@ -153,7 +175,7 @@ def _extract_categories(payload: Any) -> List[Dict[str, Any]]:
 
 
 async def get_calendar_raw(jour_iso: str) -> Dict[str, Any]:
-    """Interroge la route calendrier prouvee dans le fichier SportAPI7 fourni."""
+    """Interroge le calendrier SportAPI7 et expose les deux formats rencontrés."""
     url_path = _calendar_path(jour_iso)
     async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
         r = await client.get(BASE + url_path, headers=_headers())
@@ -161,6 +183,9 @@ async def get_calendar_raw(jour_iso: str) -> Dict[str, Any]:
         payload = r.json()
     except Exception:
         payload = r.text[:4000]
+
+    stage_ids = _extract_daily_stages(payload, jour_iso)
+    tournament_ids = _extract_daily_unique_tournaments(payload, jour_iso)
     return {
         "http_status": r.status_code,
         "date": jour_iso,
@@ -168,10 +193,14 @@ async def get_calendar_raw(jour_iso: str) -> Dict[str, Any]:
         "content_type": r.headers.get("content-type"),
         "rate_remaining": r.headers.get("x-ratelimit-requests-remaining"),
         "rate_limit": r.headers.get("x-ratelimit-requests-limit"),
-        "stage_ids_for_date": _extract_daily_stages(payload, jour_iso),
+        "stage_ids_for_date": stage_ids,
+        "unique_tournament_ids_for_date": tournament_ids,
         "summary": {
             "root_keys": list(payload.keys())[:50] if isinstance(payload, dict) else [],
             "dailyStages_count": len(payload.get("dailyStages", [])) if isinstance(payload, dict) and isinstance(payload.get("dailyStages"), list) else 0,
+            "dailyUniqueTournaments_count": len(payload.get("dailyUniqueTournaments", [])) if isinstance(payload, dict) and isinstance(payload.get("dailyUniqueTournaments"), list) else 0,
+            "stage_ids_count": len(stage_ids),
+            "unique_tournament_ids_count": len(tournament_ids),
         },
         "payload": payload,
     }
@@ -189,14 +218,56 @@ async def _get_json(client: httpx.AsyncClient, path: str) -> Tuple[int, Any, Dic
     }
 
 
+async def diagnostic_fixtures_du_jour(jour_iso: str) -> Dict[str, Any]:
+    """Diagnostic des trois voies SportAPI7 sans masquer les statuts HTTP."""
+    result: Dict[str, Any] = {"source": "SportAPI7", "date": jour_iso, "tests": []}
+    if not CLE_RAPIDAPI:
+        result["erreur"] = "RAPIDAPI_KEY non configurée"
+        return result
+
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+        paths = [
+            ("categories", f"/sport/football/{jour_iso}/0/categories"),
+            ("scheduled-events", f"/sport/football/scheduled-events/{jour_iso}"),
+            ("calendar", _calendar_path(jour_iso)),
+        ]
+        for label, path in paths:
+            status, payload, rate = await _get_json(client, path)
+            item: Dict[str, Any] = {
+                "test": label,
+                "http_status": status,
+                "url_path": path,
+                **rate,
+            }
+            if isinstance(payload, dict):
+                item["root_keys"] = list(payload.keys())[:30]
+                for key in ("categories", "data", "groups", "events", "matches", "scheduledEvents", "dailyStages", "dailyUniqueTournaments"):
+                    value = payload.get(key)
+                    if isinstance(value, list):
+                        item[f"{key}_count"] = len(value)
+            elif isinstance(payload, list):
+                item["root_shape"] = "array"
+                item["root_count"] = len(payload)
+            result["tests"].append(item)
+
+    cal = await get_calendar_raw(jour_iso)
+    result["calendar_interpretation"] = {
+        "stage_ids": cal.get("stage_ids_for_date", []),
+        "unique_tournament_ids": cal.get("unique_tournament_ids_for_date", []),
+        "unique_tournament_ids_count": len(cal.get("unique_tournament_ids_for_date", [])),
+    }
+    return result
+
+
 async def get_fixtures_du_jour(jour_iso: str) -> List[Dict[str, Any]]:
     if not CLE_RAPIDAPI:
         return []
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
-            # 1. Route categorie du jour : plus ciblée et moins couteuse qu'un
-            # enrichissement evenement par evenement.
-            status, payload, _ = await _get_json(client, f"/sport/football/{jour_iso}/0/categories")
+            # 1) Catégories du jour puis matchs par catégorie.
+            status, payload, _ = await _get_json(
+                client, f"/sport/football/{jour_iso}/0/categories"
+            )
             if status == 200:
                 out: List[Dict[str, Any]] = []
                 seen = set()
@@ -204,27 +275,33 @@ async def get_fixtures_du_jour(jour_iso: str) -> List[Dict[str, Any]]:
                     cid = cat.get("id") or cat.get("categoryId")
                     if cid is None:
                         continue
-                    cr_status, cr_payload, _ = await _get_json(client, f"/category/{cid}/scheduled-events/{jour_iso}")
+                    cr_status, cr_payload, _ = await _get_json(
+                        client, f"/category/{cid}/scheduled-events/{jour_iso}"
+                    )
                     if cr_status != 200:
                         continue
                     for m in normalize_events(cr_payload, target_date=jour_iso):
-                        key = m.get("event_id") or (m.get("date"), m.get("equipe1"), m.get("equipe2"))
+                        key = m.get("event_id") or (
+                            m.get("date"), m.get("equipe1"), m.get("equipe2")
+                        )
                         if key not in seen:
                             seen.add(key)
                             out.append(m)
                 if out:
                     return out
 
-            # 2. Fallback documente, conserve pour les abonnements qui l'exposent.
-            status, payload, _ = await _get_json(client, f"/sport/football/scheduled-events/{jour_iso}")
+            # 2) Endpoint global documenté, conservé comme fallback.
+            status, payload, _ = await _get_json(
+                client, f"/sport/football/scheduled-events/{jour_iso}"
+            )
             if status == 200:
                 out = normalize_events(payload, target_date=jour_iso)
                 if out:
                     return out
 
-            # 3. Le calendrier est au minimum une preuve de couverture du jour.
-            # On ne transforme PAS les stageIds en eventIds : ce sont deux types
-            # d'identifiants differents.
+            # 3) Le calendrier actuel fournit les compétitions du jour via
+            # dailyUniqueTournaments[].uniqueTournamentIds. Ces IDs ne sont
+            # jamais convertis artificiellement en eventIds.
             return []
     except Exception:
         return []
