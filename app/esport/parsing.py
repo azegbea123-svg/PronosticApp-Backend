@@ -62,7 +62,8 @@ def normaliser_evenement(ev: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
             "score2": (ev.get("awayScore") or {}).get("current") if a_un_score else None,
             "vainqueur": gagnant if statut == "termine" and not forfait and gagnant in (1, 2, 3) else None,
         }
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        # OverflowError/OSError : timestamp hors plage — Linux lève ValueError, Windows OSError.
         return None
 
 

@@ -9,7 +9,7 @@ from unittest import mock
 
 from tests._stubs import fixture
 
-from app.esport import client, depot, modele, parsing, service
+from app.esport import client, depot, modele, nettoyage, parsing, service
 from app.esport.service import ErreurEsport
 
 FAZE = 364396
@@ -26,6 +26,9 @@ class Isole(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def setUp(self):
+        # SÉCURITÉ : ces tests ne doivent JAMAIS toucher une vraie base Firestore (clé présente sur la machine
+        # du développeur). On force le repli en mémoire du dépôt, quoi qu'il y ait dans l'environnement.
+        self.remplacer(depot.db, "get_client", lambda: None)
         client.vider_cache()
         client._quota.update(limite=None, restant=None, fenetre_fin=None)
         depot._mem_equipes.clear()
@@ -55,6 +58,15 @@ class Parsing(unittest.TestCase):
         self.assertEqual(pour_faze["cartes_pour"], adverse["cartes_contre"])
         self.assertNotEqual(pour_faze["victoire"], adverse["victoire"])
         self.assertIsNone(parsing.vue_equipe(ev, 1))
+
+    def test_timestamp_hors_plage_ne_leve_jamais(self):
+        base = fixture("esport_event.json")["event"]
+        for ts in (10 ** 20, -10 ** 20, 2 ** 70):
+            self.assertIsNone(parsing.normaliser_evenement(dict(base, startTimestamp=ts)))
+        # Windows lève OSError (et non ValueError) pour un timestamp hors plage : simulé ici.
+        with mock.patch.object(parsing, "datetime") as faux:
+            faux.fromtimestamp.side_effect = OSError(22, "Invalid argument")
+            self.assertIsNone(parsing.normaliser_evenement(base))
 
     def test_donnees_incompletes_et_statuts(self):
         self.assertIsNone(parsing.normaliser_evenement({"id": 1}))
@@ -233,10 +245,26 @@ def evenement_a_venir(id_=555, e1=FAZE, e2=99, ts=None, statut="notstarted"):
     return ev
 
 
+def _renumeroter(o, ancien, nouveau):
+    """Remplace les identifiants d'équipe (clé "id" == ancien) SANS toucher aux autres nombres du JSON."""
+    if isinstance(o, dict):
+        return {k: (nouveau if k == "id" and v == ancien else _renumeroter(v, ancien, nouveau)) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_renumeroter(x, ancien, nouveau) for x in o]
+    return o
+
+
 def historique_pour(equipe_id):
     """Historique réel de FaZe, rejoué comme s'il appartenait à `equipe_id`."""
-    texte = json.dumps(fixture("esport_previous.json")).replace(str(FAZE), str(equipe_id))
-    return json.loads(texte)
+    return _renumeroter(fixture("esport_previous.json"), FAZE, equipe_id)
+
+
+def vieillir(reponse, jours):
+    """Recule tous les matchs d'un historique de `jours` jours."""
+    rep = copy.deepcopy(reponse)
+    for e in rep["events"]:
+        e["startTimestamp"] -= jours * 86400
+    return rep
 
 
 def ev_liste(id_, jeu, ts, statut, e1=1, e2=2, cat_id=None):
@@ -499,18 +527,13 @@ class ServicePronostic(Isole):
         self.assertIn("Quota", cm.exception.message)
 
     def test_donnees_anciennes_signalees(self):
-        ev = evenement_a_venir(ts=time.time() + 3600)
-        t = self.table(ev)
-        vieux = copy.deepcopy(t["/team/99/"])
-        for e in vieux["events"]:
-            e["startTimestamp"] -= 200 * 86400
-        t["/team/99/"] = vieux
-        t["/team/%d/" % FAZE] = copy.deepcopy(vieux)
+        t = self.table(evenement_a_venir(ts=time.time() + 3600))
+        t["/team/99/"] = vieillir(historique_pour(99), 400)
+        t["/team/%d/" % FAZE] = vieillir(historique_pour(FAZE), 400)
         self.remplacer(service.client, "appeler", faux_appeler(t))
-        # historique_pour(99) contient des équipes ids différentes : on remet FAZE côté équipe 1
-        t["/team/%d/" % FAZE] = json.loads(json.dumps(vieux).replace("99", str(FAZE)))
         r = lancer(service.pronostic(556))
         self.assertEqual(r["confiance"], "faible")
+        self.assertTrue(any("anciennes" in f for f in r["facteurs"]))
 
 
 class ServiceBilan(Isole):
@@ -565,6 +588,20 @@ class ServiceBilan(Isole):
         self.remplacer(service.client, "appeler", faux_appeler({}, compteur))
         lancer(service.bilan(max_verifications=3))
         self.assertEqual(len(compteur), 3)  # préserve le quota API
+
+
+class Nettoyage(unittest.TestCase):
+    def test_ne_selectionne_que_les_documents_factices(self):
+        pronos = [
+            {"eventId": 555, "equipe1": "FaZe", "equipe2": "Rivaux"},   # factice
+            {"eventId": 3, "equipe1": "A", "equipe2": "B"},             # factice
+            {"eventId": 555, "equipe1": "NAVI", "equipe2": "G2"},       # même id mais VRAIES équipes : conservé
+            {"eventId": 15737068, "equipe1": "A", "equipe2": "B"},      # noms factices mais id réel : conservé
+            {"eventId": 10944540, "equipe1": "Iron Branch", "equipe2": "Sparta"},
+        ]
+        self.assertEqual([p["eventId"] for p in nettoyage.pronostics_de_test(pronos)], [555, 3])
+        equipes = [{"id": 1, "nom": "A"}, {"id": 1, "nom": "Vraie équipe"}, {"id": 364396, "nom": "FaZe"}]
+        self.assertEqual(nettoyage.equipes_de_test(equipes), [{"id": 1, "nom": "A"}])
 
 
 if __name__ == "__main__":
