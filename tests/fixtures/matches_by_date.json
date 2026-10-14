@@ -1,0 +1,166 @@
+{
+ "status": "success",
+ "response": {
+  "matches": [
+   {
+    "id": 5181829,
+    "leagueId": 920744,
+    "time": "01.10.2026 20:45",
+    "home": {
+     "id": 8570,
+     "score": 2,
+     "name": "Germany",
+     "longName": "Germany"
+    },
+    "away": {
+     "id": 8205,
+     "score": 0,
+     "name": "Serbia",
+     "longName": "Serbia"
+    },
+    "eliminatedTeamId": null,
+    "statusId": 6,
+    "tournamentStage": "3",
+    "status": {
+     "utcTime": "2026-10-01T18:45:00.000Z",
+     "halfs": {
+      "firstHalfStarted": "01.10.2026 20:46:39",
+      "secondHalfStarted": "01.10.2026 21:48:24"
+     },
+     "periodLength": 45,
+     "finished": true,
+     "started": true,
+     "cancelled": false,
+     "awarded": false,
+     "scoreStr": "2 - 0",
+     "reason": {
+      "short": "FT",
+      "shortKey": "fulltime_short",
+      "long": "Full-Time",
+      "longKey": "finished"
+     }
+    },
+    "timeTS": 1790880300000
+   },
+   {
+    "id": 6315046,
+    "leagueId": 914609,
+    "time": "01.10.2026 08:10",
+    "home": {
+     "id": 5922,
+     "score": 1,
+     "name": "Panama",
+     "penScore": 3,
+     "longName": "Panama"
+    },
+    "away": {
+     "id": 5820,
+     "score": 1,
+     "name": "New Zealand",
+     "penScore": 5,
+     "longName": "New Zealand"
+    },
+    "eliminatedTeamId": 5922,
+    "statusId": 13,
+    "tournamentStage": "1",
+    "status": {
+     "utcTime": "2026-10-01T06:10:00.000Z",
+     "halfs": {
+      "firstHalfStarted": "01.10.2026 08:11:07",
+      "secondHalfStarted": "01.10.2026 09:13:34"
+     },
+     "periodLength": 45,
+     "finished": true,
+     "started": true,
+     "cancelled": false,
+     "awarded": false,
+     "scoreStr": "1 - 1",
+     "reason": {
+      "short": "Pen",
+      "shortKey": "penalties_short",
+      "long": "After penalties",
+      "longKey": "afterpenalties"
+     }
+    },
+    "timeTS": 1790835000000
+   },
+   {
+    "id": 6366622,
+    "leagueId": 915708,
+    "time": "01.10.2026 20:00",
+    "home": {
+     "id": 8603,
+     "score": 0,
+     "name": "Real Betis",
+     "longName": "Real Betis"
+    },
+    "away": {
+     "id": 357259,
+     "score": 0,
+     "name": "AD Ceuta FC",
+     "longName": "AD Ceuta FC"
+    },
+    "eliminatedTeamId": null,
+    "statusId": 5,
+    "tournamentStage": "1",
+    "status": {
+     "utcTime": "2026-10-01T18:00:00.000Z",
+     "halfs": {
+      "firstHalfStarted": "01.10.2026 20:00:00"
+     },
+     "periodLength": 45,
+     "cancelled": true,
+     "started": false,
+     "finished": false,
+     "reason": {
+      "short": "PP",
+      "shortKey": "postponed_short",
+      "long": "Postponed",
+      "longKey": "postponed"
+     }
+    },
+    "timeTS": 1790877600000
+   },
+   {
+    "id": 1000020530,
+    "leagueId": 1000001461,
+    "time": "01.10.2026 15:15",
+    "home": {
+     "id": 102124,
+     "score": 2,
+     "name": "Sharjah Cultural Club",
+     "longName": "Sharjah Cultural Club"
+    },
+    "away": {
+     "id": 102118,
+     "score": 1,
+     "name": "Al-Dhafra",
+     "longName": "Al-Dhafra"
+    },
+    "eliminatedTeamId": null,
+    "statusId": 6,
+    "tournamentStage": "2",
+    "status": {
+     "utcTime": "2026-10-01T13:15:00.000Z",
+     "halfs": {
+      "firstHalfStarted": "01.10.2026 15:15:57",
+      "secondHalfStarted": "01.10.2026 16:21:48"
+     },
+     "periodLength": 45,
+     "finished": true,
+     "started": true,
+     "cancelled": false,
+     "awarded": false,
+     "scoreStr": "2 - 1",
+     "reason": {
+      "short": "FT",
+      "shortKey": "fulltime_short",
+      "long": "Full-Time",
+      "longKey": "finished"
+     }
+    },
+    "timeTS": 1790860500000
+   }
+  ]
+ }
+}

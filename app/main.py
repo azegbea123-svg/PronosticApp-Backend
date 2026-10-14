@@ -1,9 +1,6 @@
 import asyncio
 import random
 import string
-import re
-import math
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
@@ -29,18 +26,16 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from pydantic import BaseModel
 
-from .models import MatchAnalysisRequest, MatchAnalysisResponse, MatchDetailResponse
-from .sources import sofascore, besoccer, flashscore, api_football, livefootball_rapidapi
+from .models import MatchAnalysisRequest, MatchAnalysisResponse
+from .sources import sofascore, besoccer, flashscore, api_football
 from .analysis import generer_pronostic
-from .consensus import odds_to_probabilities, data_quality, fuse, confidence_score
-from .v3.model_registry import get_engine, ENGINE_VERSION, ENGINE_DESCRIPTION
-from .v3.walk_forward import run as run_v3_walk_forward
-from .v3 import source_probe
 from . import db
 from . import repo
 from . import paygate
 from . import auth
 from . import matchs as matchs_service
+from . import contexte as contexte_service
+from .esport.routes import router as esport_router
 from .config import PRIX_VIP_FCFA, DUREE_VIP_JOURS, LIMITE_GRATUITE_QUOTIDIENNE
 
 app = FastAPI(
@@ -53,15 +48,13 @@ app = FastAPI(
         {"name": "✏️ Pronostic — Actions", "description": "Analyser un match — le cœur de l'appli."},
         {"name": "✏️ Compte — Actions", "description": "Modifier ou supprimer son propre compte."},
         {"name": "✏️ VIP — Actions", "description": "Payer, confirmer ou activer le VIP."},
+        {"name": "🎮 Esport", "description": "Matchs, suivi et pronostics e-sport (CS, Dota 2...)."},
         {"name": "✏️ Admin — Actions", "description": "Générer des codes VIP, tester le moteur de pronostic (réservé admin)."},
     ],
 )
 
-# Cache mémoire court pour les appels Football Prediction API. Il évite de
-# refaire exactement la même requête pour plusieurs utilisateurs/requêtes
-# rapprochées et réduit la consommation du quota RapidAPI.
-_PREDICTION_EXTERNE_CACHE: Dict[str, tuple[float, Optional[Dict[str, Any]]]] = {}
-_PREDICTION_EXTERNE_TTL = 10 * 60
+# Module esport (ajout) : routes /esport/* — voir app/esport/.
+app.include_router(esport_router)
 
 # CORS ouvert : simple pour un backend consommé uniquement par l'appli Android.
 app.add_middleware(
@@ -76,46 +69,6 @@ app.add_middleware(
 async def health():
     """Endpoint de santé, utile pour vérifier que le déploiement fonctionne."""
     return {"status": "ok", "service": "PronosticApp API"}
-
-@app.get("/api/health/apis", tags=["Système"])
-async def health_apis(uid: str = Depends(auth.utilisateur_courant)):
-    """Diagnostic léger des fournisseurs RapidAPI déjà configurés.
-
-    Les résultats sont mis en cache 60 s afin de ne pas transformer cette
-    route en générateur de consommation de quota. Aucun secret n'est renvoyé.
-    """
-    now = time.time()
-    cached = getattr(health_apis, "_cache", None)
-    if cached and now - cached[0] < 60:
-        return {**cached[1], "cached": True}
-    from .config import CLE_RAPIDAPI
-    result = {"overall": "DEGRADED", "checked_at": datetime.now(timezone.utc).isoformat(), "providers": {}}
-    if not CLE_RAPIDAPI:
-        result["overall"] = "DOWN"
-        result["providers"] = {"rapidapi": {"status": "AUTH_ERROR", "http_status": None}}
-    else:
-        tests = [
-            ("live_football", "https://free-api-live-football-data.p.rapidapi.com/football-popular-leagues", "free-api-live-football-data.p.rapidapi.com"),
-            ("football_prediction", "https://football-prediction-api.p.rapidapi.com/api/v2/list-markets", "football-prediction-api.p.rapidapi.com"),
-        ]
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            async def check(name, url, host):
-                t0 = time.perf_counter()
-                try:
-                    r = await client.get(url, headers={"x-rapidapi-key": CLE_RAPIDAPI, "x-rapidapi-host": host})
-                    item = {"provider": host, "status": "OK" if r.status_code == 200 else ("RATE_OR_QUOTA_LIMIT" if r.status_code == 429 else ("AUTH_ERROR" if r.status_code in (401,403) else "PROVIDER_ERROR")), "http_status": r.status_code, "latency_ms": round((time.perf_counter()-t0)*1000)}
-                    for h in ("x-ratelimit-requests-remaining", "x-ratelimit-requests-limit", "x-ratelimit-requests-reset"):
-                        if r.headers.get(h) is not None:
-                            item[h] = r.headers.get(h)
-                    return name, item
-                except Exception as e:
-                    return name, {"provider": host, "status": "NETWORK_ERROR", "http_status": None, "latency_ms": round((time.perf_counter()-t0)*1000)}
-            pairs = await asyncio.gather(*[check(*x) for x in tests])
-        result["providers"] = dict(pairs)
-        states = [x["status"] for x in result["providers"].values()]
-        result["overall"] = "OK" if all(x == "OK" for x in states) else ("DOWN" if all(x not in ("OK",) for x in states) else "DEGRADED")
-    health_apis._cache = (now, result)
-    return {**result, "cached": False}
 
 
 @app.get("/debug/db", tags=["📖 Admin — Diagnostic"])
@@ -362,67 +315,19 @@ def _resultat_predit(p_v1: float, p_nul: float, p_v2: float) -> str:
     return "NUL"
 
 
-
-async def _prediction_externe(equipe1: str, equipe2: str, date_iso: Optional[str] = None) -> Optional[Dict[str, Any]]:
+@app.get("/match/contexte", tags=["📖 Pronostic — Infos"])
+async def contexte_match(fixtureId: int, uid: str = Depends(auth.utilisateur_courant)):
     """
-    Utilise football-prediction-api via la même clé RapidAPI.
-    Cette donnée est informative : elle ne remplace jamais notre moteur
-    Poisson/Dixon-Coles/ELO. On cherche le match dans les prédictions du jour.
+    Classement des deux équipes + confrontations directes d'un match de la
+    liste (`fixtureId` = fixture_id renvoyé par /matchs). Purement
+    informatif, gratuit (ne consomme PAS une analyse quotidienne) ;
+    `disponible=false` si la source ne fournit rien pour ce match.
     """
-    from .config import CLE_RAPIDAPI
-    if not CLE_RAPIDAPI:
-        return None
-    from datetime import datetime, timezone
-    jour = date_iso[:10] if date_iso else datetime.now(timezone.utc).date().isoformat()
-    cache_key = f"{jour}|{equipe1.strip().lower()}|{equipe2.strip().lower()}"
-    maintenant = time.time()
-    cached = _PREDICTION_EXTERNE_CACHE.get(cache_key)
-    if cached and maintenant - cached[0] < _PREDICTION_EXTERNE_TTL:
-        return cached[1]
-    url = "https://football-prediction-api.p.rapidapi.com/api/v2/predictions"
-    headers = {"x-rapidapi-key": CLE_RAPIDAPI, "x-rapidapi-host": "football-prediction-api.p.rapidapi.com"}
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(url, headers=headers, params={"market":"classic","iso_date":jour}, timeout=10.0)
-            if r.status_code != 200:
-                _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, None)
-                return None
-            rows = (r.json() or {}).get("data") or []
-    except Exception:
-        _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, None)
-        return None
-    def norm(x): return re.sub(r"[^a-z0-9]", "", (x or "").lower())
-    n1, n2 = norm(equipe1), norm(equipe2)
-    for row in rows:
-        if norm(row.get("home_team")) == n1 and norm(row.get("away_team")) == n2:
-            pred = row.get("prediction_per_market",{}).get("classic",{}).get("prediction") or row.get("prediction")
-            odds = row.get("odds") or row.get("prediction_per_market",{}).get("classic",{}).get("odds") or {}
-            prob = None
-            # Probabilité implicite normalisée (retire la marge en normalisant
-            # les trois issues 1/X/2). On n'assimile pas directement 1/cote
-            # à une probabilité.
-            if pred in ("1", "X", "2"):
-                try:
-                    inv = [1 / float(odds[k]) for k in ("1", "X", "2") if odds.get(k)]
-                    if len(inv) == 3:
-                        probs = [x / sum(inv) for x in inv]
-                        prob = round(probs[{"1": 0, "X": 1, "2": 2}[pred]], 3)
-                except Exception:
-                    prob = None
-            probabilites_cotes = odds_to_probabilities(odds)
-            resultat = {
-                "prediction": pred,
-                "probability": prob,
-                "probabilities": probabilites_cotes,
-                "odds": odds,
-                "match_id": row.get("id"),
-                "competition": row.get("competition_name"),
-                "source": "Football Prediction API",
-            }
-            _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, resultat)
-            return resultat
-    _PREDICTION_EXTERNE_CACHE[cache_key] = (maintenant, None)
-    return None
+        return await asyncio.wait_for(contexte_service.construire(fixtureId), timeout=15.0)
+    except asyncio.TimeoutError:
+        return {"disponible": False, "raison": "délai dépassé"}
+
 
 @app.post("/match/analyse", response_model=MatchAnalysisResponse, tags=["✏️ Pronostic — Actions"])
 async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.utilisateur_courant)):
@@ -457,59 +362,18 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
         stats2_sources,
         elo_confrontation=elo_confrontation,
     )
-    resultat["_stats1"] = stats1_sources
-    resultat["_stats2"] = stats2_sources
-    resultat["_elo"] = elo_confrontation
-    # Comparaison indépendante avec le moteur Football Prediction API.
-    try:
-        ext = await _prediction_externe(requete.equipe1, requete.equipe2)
-        if ext:
-            resultat["predictionExterne"] = ext.get("prediction")
-            resultat["sourcePredictionExterne"] = ext.get("source")
-            resultat["probabilitePredictionExterne"] = ext.get("probability")
-            if ext.get("prediction"):
-                resultat["facteursCles"].append(
-                    f"Contrôle externe : {ext['prediction']} ({ext['source']})"
-                )
-    except Exception:
-        pass
 
-    # V2 PRO : fusion probabiliste prudente. La confiance n'est plus la
-    # moyenne arbitraire de deux probabilités ; elle tient compte de la
-    # qualité des données, de l'écart entre modèles et de leur accord.
-    try:
-        q = data_quality(
-            resultat.get("_stats1"), resultat.get("_stats2"),
-            resultat.get("_elo")
-        )
-        model_probs = {
-            "V1": resultat["probabiliteVictoireEquipe1"],
-            "NUL": resultat["probabiliteMatchNul"],
-            "V2": resultat["probabiliteVictoireEquipe2"],
-        }
-        ext_probs = ext.get("probabilities") if ext else None
-        consensus_probs, meta = fuse(model_probs, ext_probs, q["score"], bool(ext_probs))
-        conf = confidence_score(consensus_probs, q["score"], meta)
-        resultat["probabiliteVictoireEquipe1"] = round(consensus_probs["V1"], 3)
-        resultat["probabiliteMatchNul"] = round(consensus_probs["NUL"], 3)
-        resultat["probabiliteVictoireEquipe2"] = round(consensus_probs["V2"], 3)
-        resultat["confianceGlobale"] = round(max(consensus_probs.values()), 3)
-        resultat["scoreConfiance"] = conf["score"]
-        resultat["niveauConfiance"] = conf["niveau"]
-        resultat["qualiteDonnees"] = q
-        resultat["consensus"] = {**meta, "probabilites": {k: round(v, 3) for k, v in consensus_probs.items()}}
-        resultat["sourcesUtilisees"] = sorted(set(
-            [x.get("source") for x in (resultat.get("_stats1") or []) if isinstance(x, dict)] +
-            [x.get("source") for x in (resultat.get("_stats2") or []) if isinstance(x, dict)] +
-            ([ext.get("source")] if ext else [])
-        ) - {None})
-        resultat["alertesAnalyse"] = []
-        if q["score"] < 45:
-            resultat["alertesAnalyse"].append("Données limitées : confiance réduite.")
-        if meta.get("accord") == "FAIBLE":
-            resultat["alertesAnalyse"].append("Les modèles internes et externes divergent fortement.")
-    except Exception:
-        pass
+    # Contexte (classement + confrontations directes) via le fournisseur
+    # RapidAPI, si l'appli indique de quel match de la liste il s'agit.
+    # Informatif seulement : n'influence jamais les probabilités.
+    if requete.fixtureId:
+        try:
+            ctx = await asyncio.wait_for(contexte_service.construire(requete.fixtureId), timeout=10.0)
+            resultat["facteursCles"].extend(
+                contexte_service.resumer(ctx, requete.equipe1, requete.equipe2)
+            )
+        except Exception:
+            pass
 
     # Enrichissement optionnel via API-Football : historique COMPLET des
     # confrontations directes (contrairement à la détection BeSoccer, qui
@@ -518,7 +382,8 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
     # quota est atteint, ou si l'équipe est introuvable — n'affecte
     # jamais le calcul des probabilités, purement informatif.
     try:
-        historique = await api_football.get_historique_confrontations(requete.equipe1, requete.equipe2)
+        deja_h2h = any(str(f).startswith("Confrontations directes") for f in resultat["facteursCles"])
+        historique = None if deja_h2h else await api_football.get_historique_confrontations(requete.equipe1, requete.equipe2)
         if historique:
             v1 = sum(1 for m in historique if (m["equipe_domicile"] == requete.equipe1 and m["buts_domicile"] > m["buts_exterieur"]) or (m["equipe_exterieur"] == requete.equipe1 and m["buts_exterieur"] > m["buts_domicile"]))
             nuls = sum(1 for m in historique if m["buts_domicile"] == m["buts_exterieur"])
@@ -529,40 +394,6 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
             )
     except Exception:
         pass  # enrichissement optionnel — ne doit jamais faire échouer l'analyse principale
-
-    # ========================= V3 =========================
-    # V3 est exécuté en parallèle du moteur historique : s'il échoue,
-    # l'ancienne réponse reste disponible. Il n'ajoute aucune nouvelle
-    # clé RapidAPI et utilise uniquement les données déjà récupérées.
-    try:
-        elo1_v3 = (elo_confrontation or {}).get("elo_equipe1")
-        elo2_v3 = (elo_confrontation or {}).get("elo_equipe2")
-        ext_v3 = None
-        if ext and ext.get("probabilities"):
-            ext_v3 = ext["probabilities"]
-        v3 = get_engine().predict(
-            requete.equipe1, requete.equipe2, stats1_sources, stats2_sources,
-            elo1=elo1_v3, elo2=elo2_v3, external=ext_v3, learn=False
-        )
-        resultat["probabiliteVictoireEquipe1"] = round(v3["probabilities"]["V1"], 3)
-        resultat["probabiliteMatchNul"] = round(v3["probabilities"]["NUL"], 3)
-        resultat["probabiliteVictoireEquipe2"] = round(v3["probabilities"]["V2"], 3)
-        resultat["butsAttendusEquipe1"] = v3["expected_goals"]["home"]
-        resultat["butsAttendusEquipe2"] = v3["expected_goals"]["away"]
-        resultat["scoresProbables"] = [
-            {"score": x["score"], "probabilite": x["probability"]} for x in v3["scores"][:3]
-        ]
-        resultat["confianceGlobale"] = round(max(v3["probabilities"].values()), 3)
-        resultat["scoreConfiance"] = round(max(v3["probabilities"].values()) * 100)
-        resultat["niveauConfiance"] = "Élevée" if max(v3["probabilities"].values()) >= .60 else ("Moyenne" if max(v3["probabilities"].values()) >= .45 else "Faible")
-        resultat["qualiteDonnees"] = {"score": v3["quality"], "engine": ENGINE_VERSION}
-        resultat["consensus"] = {"engine": ENGINE_VERSION, "weights": v3["weights"], "models": v3["models"], "probabilites": v3["probabilities"], "temperature": v3["temperature"]}
-        resultat["alertesAnalyse"] = list(resultat.get("alertesAnalyse") or [])
-        if v3["no_bet"]["decision"] == "NO_BET":
-            resultat["alertesAnalyse"].append("V3 recommande NO_BET : " + "; ".join(v3["no_bet"]["reasons"]))
-        resultat["facteursCles"].append(f"Moteur {ENGINE_VERSION} : ensemble adaptatif DC + Bivarié + ELO + ML + signaux externes.")
-    except Exception as exc:
-        resultat.setdefault("alertesAnalyse", []).append("V3 indisponible temporairement : moteur historique conservé.")
 
     resultat["vip"] = est_vip
     resultat["pronosticsRestantsAujourdhui"] = pronostics_restants
@@ -584,128 +415,6 @@ async def analyser_match(requete: MatchAnalysisRequest, uid: str = Depends(auth.
 
     return resultat
 
-
-@app.get("/debug/v3/sources", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sources(uid: str = Depends(auth.utilisateur_courant)):
-    """Catalogue des sources et état de validation, sans aucun appel externe."""
-    auth.exiger_admin(uid)
-    from .v3.source_registry import catalogue
-    return catalogue()
-
-@app.get("/debug/v3/source/{source_id}/test", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_source_test(source_id: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Teste réellement UNE source RapidAPI et extrait les matchs détectés."""
-    auth.exiger_admin(uid)
-    if source_id not in source_probe.ENDPOINTS:
-        raise HTTPException(404, f"Source inconnue: {source_id}")
-    return await source_probe.tester_source(source_id)
-
-
-@app.get("/debug/v3/sources/test-all", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sources_test_all(uid: str = Depends(auth.utilisateur_courant)):
-    """Teste séquentiellement toutes les nouvelles sources RapidAPI."""
-    auth.exiger_admin(uid)
-    return await source_probe.tester_toutes_sources()
-
-
-@app.get("/debug/v3/sportapi7/fixtures/{jour_iso}", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sportapi7_fixtures(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Teste directement le calendrier football SportAPI7 pour une date YYYY-MM-DD."""
-    auth.exiger_admin(uid)
-    from .sources import sportapi7
-    return {"source": "SportAPI7", "date": jour_iso, "matchs": await sportapi7.get_fixtures_du_jour(jour_iso)}
-
-
-@app.get("/debug/v3/sportapi7/calendar/{jour_iso}", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sportapi7_calendar(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Teste le calendrier football SportAPI7 et extrait les stageIds du jour."""
-    auth.exiger_admin(uid)
-    from .sources import sportapi7
-    return await sportapi7.get_calendar_raw(jour_iso)
-
-
-@app.get("/debug/v3/sportapi7/raw/{jour_iso}", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sportapi7_raw(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Diagnostic brut du endpoint scheduled-events : statut, quotas et structure."""
-    auth.exiger_admin(uid)
-    from .sources import sportapi7
-    return await sportapi7.get_scheduled_events_raw(jour_iso)
-
-
-@app.get("/debug/v3/sportapi7/sync/{jour_iso}", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sportapi7_sync(jour_iso: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Synchronise la journee SportAPI7 et renvoie les statistiques de cache."""
-    auth.exiger_admin(uid)
-    from .sources import sportapi7
-    from . import repo
-    matchs = await sportapi7.get_fixtures_du_jour(jour_iso)
-    if matchs:
-        repo.enregistrer_matchs_jour(jour_iso, matchs)
-        repo.marquer_matchs_rafraichis(jour_iso)
-    return {
-        "source": "SportAPI7",
-        "date": jour_iso,
-        "matchs_count": len(matchs),
-        "cache_count": len(repo.lister_matchs_jour(jour_iso)),
-        "diagnostic": getattr(sportapi7.get_fixtures_du_jour, "last_diagnostic", {}),
-    }
-
-
-@app.get("/debug/v3/sportapi7/event/{event_id}", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sportapi7_event(event_id: int, uid: str = Depends(auth.utilisateur_courant)):
-    """Récupère le détail d'un événement SportAPI7 sans exposer la clé RapidAPI."""
-    auth.exiger_admin(uid)
-    from .sources import sportapi7
-    detail = await sportapi7.get_event_detail(event_id)
-    if detail is None:
-        raise HTTPException(404, "Événement SportAPI7 introuvable ou indisponible")
-    return {"source": "SportAPI7", "event_id": event_id, "event": detail}
-
-
-@app.get("/debug/v3/sources/state", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_sources_state(uid: str = Depends(auth.utilisateur_courant)):
-    """Retourne l'état test/activation des sources sans appel externe."""
-    auth.exiger_admin(uid)
-    return source_probe.etat_sources()
-
-
-@app.post("/debug/v3/source/{source_id}/activate", tags=["✏️ Admin — Actions"])
-async def debug_v3_source_activate(source_id: str, force: bool = False, uid: str = Depends(auth.utilisateur_courant)):
-    """Active une source après test. force=true permet une activation manuelle après inspection."""
-    auth.exiger_admin(uid)
-    if source_id not in source_probe.ENDPOINTS:
-        raise HTTPException(404, f"Source inconnue: {source_id}")
-    return source_probe.activer(source_id, force=force)
-
-
-@app.post("/debug/v3/source/{source_id}/deactivate", tags=["✏️ Admin — Actions"])
-async def debug_v3_source_deactivate(source_id: str, uid: str = Depends(auth.utilisateur_courant)):
-    """Désactive immédiatement une source."""
-    auth.exiger_admin(uid)
-    if source_id not in source_probe.ENDPOINTS:
-        raise HTTPException(404, f"Source inconnue: {source_id}")
-    return source_probe.desactiver(source_id)
-
-
-@app.get("/debug/v3/status", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_status(uid: str = Depends(auth.utilisateur_courant)):
-    auth.exiger_admin(uid)
-    eng=get_engine()
-    return {"engine_version":ENGINE_VERSION,"description":ENGINE_DESCRIPTION,"adaptive_weights":eng.adaptive.weights(),"performance":eng.adaptive.diagnostics(),"calibration_samples":len(eng.calibration_history)}
-
-@app.get("/debug/v3/weights", tags=["📖 Admin — Diagnostic"])
-async def debug_v3_weights(uid: str = Depends(auth.utilisateur_courant)):
-    auth.exiger_admin(uid)
-    eng=get_engine()
-    return {"engine_version":ENGINE_VERSION,"weights":eng.adaptive.weights(),"diagnostics":eng.adaptive.diagnostics()}
-
-@app.post("/debug/v3/walk-forward", tags=["✏️ Admin — Actions"])
-async def debug_v3_walk_forward(payload: Dict[str, Any], uid: str = Depends(auth.utilisateur_courant)):
-    auth.exiger_admin(uid)
-    rows=payload.get("matchs") or payload.get("matches") or []
-    if not isinstance(rows,list) or not rows:
-        raise HTTPException(400,"Le champ 'matchs' doit contenir une liste de matchs avec snapshots pré-match.")
-    return run_v3_walk_forward(rows, min_history=int(payload.get("min_history",20)), rolling=int(payload.get("rolling",0)))
 
 @app.get("/debug/fixtures", tags=["📖 Admin — Diagnostic"])
 async def debug_fixtures(jour: str = None, uid: str = Depends(auth.utilisateur_courant)):
@@ -766,13 +475,6 @@ async def debug_football_data(date: Optional[str] = None, uid: str = Depends(aut
     return resultat
 
 
-@app.get("/debug/livefootball-circuit", tags=["📖 Admin — Diagnostic"])
-async def debug_livefootball_circuit(uid: str = Depends(auth.utilisateur_courant)):
-    """Etat du coupe-circuit local déclenché par un 429 RapidAPI Live Football."""
-    auth.exiger_admin(uid)
-    return livefootball_rapidapi.etat_rate_limit()
-
-
 @app.get("/debug/livefootball", tags=["📖 Admin — Diagnostic"])
 async def debug_livefootball(date: Optional[str] = None, uid: str = Depends(auth.utilisateur_courant)):
     """
@@ -801,6 +503,37 @@ async def debug_livefootball(date: Optional[str] = None, uid: str = Depends(auth
     return resultat
 
 
+@app.get("/debug/sources", tags=["📖 Admin — Diagnostic"])
+async def debug_sources(uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 État de santé de chaque source de matchs (disjoncteur) : appels,
+    succès, échecs consécutifs, pause restante, dernier détail d'erreur.
+    Une source en pause (3 échecs de suite) est réessayée après 30 min.
+    """
+    auth.exiger_admin(uid)
+    from .sources import sante
+    from .matchs import SOURCES
+    rapport = sante.rapport()
+    return {"sources_ordre_priorite_croissante": [n for n, _ in SOURCES], "sante": rapport}
+
+
+@app.get("/debug/sportapi7", tags=["📖 Admin — Diagnostic"])
+async def debug_sportapi7(date: Optional[str] = None, uid: str = Depends(auth.utilisateur_courant)):
+    """
+    🔧 Teste le chemin de la LISTE par date de SportAPI7 (non vérifié, voir
+    sources/sportapi7.py). Si `erreur` : vérifie l'abonnement et le chemin
+    dans le playground RapidAPI, puis ajuste CHEMIN_PROGRAMME.
+    """
+    auth.exiger_admin(uid)
+    from .sources import sportapi7
+    jour_cible = _resoudre_jour_debug(date)
+    resultat = await sportapi7.appel_diagnostic(jour_cible)
+    fixtures = await sportapi7.get_fixtures_du_jour(jour_cible)
+    resultat["matchs_normalises"] = None if fixtures is None else len(fixtures)
+    resultat["exemple"] = None if not fixtures else fixtures[:2]
+    return resultat
+
+
 @app.get("/debug/openliga", tags=["📖 Admin — Diagnostic"])
 async def debug_openliga(date: Optional[str] = None, uid: str = Depends(auth.utilisateur_courant)):
     """
@@ -823,101 +556,6 @@ async def debug_openliga(date: Optional[str] = None, uid: str = Depends(auth.uti
     }
 
 
-
-@app.get("/match/detail/{fixture_id}", response_model=MatchDetailResponse, tags=["📖 Pronostic — Infos"])
-async def detail_match(fixture_id: str, uid: str = Depends(auth.utilisateur_courant)):
-    """
-    Fiche match enrichie. Pour les matchs issus de free-api-live-football-data,
-    récupère en parallèle statut, score, statistiques, H2H et compositions.
-    Pour les autres fournisseurs, retourne au minimum l'identifiant demandé.
-    """
-    if not fixture_id.startswith("live-"):
-        raise HTTPException(404, "Les données détaillées ne sont pas disponibles pour ce fournisseur.")
-    try:
-        event_id = int(fixture_id.split("-", 1)[1])
-    except ValueError:
-        raise HTTPException(400, "fixture_id invalide")
-
-    import asyncio
-    status, score, stats, h2h, lineups, detail = await asyncio.gather(
-        livefootball_rapidapi.get_match_status(event_id),
-        livefootball_rapidapi.get_match_score(event_id),
-        livefootball_rapidapi.get_match_stats(event_id),
-        livefootball_rapidapi.get_head_to_head(event_id),
-        livefootball_rapidapi.get_lineups(event_id),
-        livefootball_rapidapi.get_match_detail(event_id),
-    )
-    base = detail or {}
-    home = (base.get("home") or {}).get("name") or "Domicile"
-    away = (base.get("away") or {}).get("name") or "Extérieur"
-    league = (base.get("league") or {}).get("name")
-    date = ((base.get("status") or {}).get("utcTime")
-            or ((base.get("time") or {}).get("utcTime")))
-    top_stats = []
-    for bloc in (stats or []):
-        for st in (bloc.get("stats") or []) if isinstance(bloc, dict) else []:
-            vals = st.get("stats") if isinstance(st, dict) else None
-            if isinstance(vals, list) and len(vals) >= 2 and vals[0] is not None and vals[1] is not None:
-                top_stats.append({
-                    "label": st.get("title") or st.get("key") or "Statistique",
-                    "home": str(vals[0]),
-                    "away": str(vals[1]),
-                })
-        if len(top_stats) >= 10:
-            break
-    h2h_matches = (h2h or {}).get("matches") if isinstance(h2h, dict) else []
-    h2h_matches = h2h_matches if isinstance(h2h_matches, list) else []
-    h2h_matches = [
-        {
-            "date": ((m.get("time") or {}).get("utcTime")),
-            "home": ((m.get("home") or {}).get("name")),
-            "away": ((m.get("away") or {}).get("name")),
-            "score": ((m.get("status") or {}).get("scoreStr")),
-            "league": ((m.get("league") or {}).get("name")),
-        }
-        for m in h2h_matches[:5]
-    ]
-    formations = {
-        "home": (lineups.get("home") or {}).get("formation"),
-        "away": (lineups.get("away") or {}).get("formation"),
-        "homeRating": (lineups.get("home") or {}).get("rating"),
-        "awayRating": (lineups.get("away") or {}).get("rating"),
-    }
-    return {
-        "fixture_id": fixture_id,
-        "event_id": event_id,
-        "date": date,
-        "league": league,
-        "equipe1": home,
-        "equipe2": away,
-        "statut": status,
-        "score": score or [],
-        "statistiques": stats or [],
-        "statistiquesTop": top_stats,
-        "confrontations": h2h,
-        "h2hRecents": h2h_matches,
-        "compositions": lineups,
-        "formations": formations,
-        "detail": base,
-    }
-
-@app.get("/live", tags=["📖 Pronostic — Infos"])
-async def matchs_en_direct(uid: str = Depends(auth.utilisateur_courant)):
-    data = await livefootball_rapidapi._get("/football-current-live")
-    return {"matchs": ((data or {}).get("response") or {}).get("matches", [])}
-
-@app.get("/ligues/populaires", tags=["📖 Pronostic — Infos"])
-async def ligues_populaires(uid: str = Depends(auth.utilisateur_courant)):
-    return {"ligues": await livefootball_rapidapi.get_popular_leagues()}
-
-@app.get("/ligues/{league_id}/classement", tags=["📖 Pronostic — Infos"])
-async def classement_ligue(league_id: int, mode: str = "all", uid: str = Depends(auth.utilisateur_courant)):
-    return {
-        "league_id": league_id,
-        "mode": mode if mode in ("all", "home", "away") else "all",
-        "classement": await livefootball_rapidapi.get_standing(league_id, mode),
-    }
-
 @app.get("/matchs", tags=["📖 Pronostic — Infos"])
 async def lister_matchs(
     jour: str = "today",
@@ -926,7 +564,12 @@ async def lister_matchs(
 ):
     """
     Liste de TOUS les matchs du jour ou du lendemain (jour="today"|"tomorrow"),
-    sans filtre par championnat. `donneesDisponibles` vaut :
+    sans filtre par championnat. Chaque match peut porter, quand la source
+    les fournit : `logo1`/`logo2`, `statut` ("prevu"|"en_direct"|"termine"|
+    "reporte"|"annule"), `score1`/`score2`, `minute` (en direct seulement),
+    `league` (vrai nom), `league_pays`, `league_logo`, `league_rang`
+    (plus grand = plus important ; 100 et + = championnats populaires).
+    `donneesDisponibles` vaut :
       - null tant que la vérification BeSoccer n'a pas encore eu lieu
         (l'appli doit afficher le match comme "en cours de vérification",
         pas cliquable) ;
@@ -946,6 +589,7 @@ async def lister_matchs(
 
     if background_tasks is not None:
         background_tasks.add_task(matchs_service.verifier_disponibilite_prochains, resultat["jour"])
+        background_tasks.add_task(matchs_service.completer_ligues, resultat["jour"])
 
     return resultat
 
@@ -1291,59 +935,6 @@ async def debug_analyser_match(requete: DebugAnalyseRequest, uid: str = Depends(
         stats2_sources,
         elo_confrontation=elo_confrontation,
     )
-    resultat["_stats1"] = stats1_sources
-    resultat["_stats2"] = stats2_sources
-    resultat["_elo"] = elo_confrontation
-    # Comparaison indépendante avec le moteur Football Prediction API.
-    try:
-        ext = await _prediction_externe(requete.equipe1, requete.equipe2)
-        if ext:
-            resultat["predictionExterne"] = ext.get("prediction")
-            resultat["sourcePredictionExterne"] = ext.get("source")
-            resultat["probabilitePredictionExterne"] = ext.get("probability")
-            if ext.get("prediction"):
-                resultat["facteursCles"].append(
-                    f"Contrôle externe : {ext['prediction']} ({ext['source']})"
-                )
-    except Exception:
-        pass
-
-    # V2 PRO : fusion probabiliste prudente. La confiance n'est plus la
-    # moyenne arbitraire de deux probabilités ; elle tient compte de la
-    # qualité des données, de l'écart entre modèles et de leur accord.
-    try:
-        q = data_quality(
-            resultat.get("_stats1"), resultat.get("_stats2"),
-            resultat.get("_elo")
-        )
-        model_probs = {
-            "V1": resultat["probabiliteVictoireEquipe1"],
-            "NUL": resultat["probabiliteMatchNul"],
-            "V2": resultat["probabiliteVictoireEquipe2"],
-        }
-        ext_probs = ext.get("probabilities") if ext else None
-        consensus_probs, meta = fuse(model_probs, ext_probs, q["score"], bool(ext_probs))
-        conf = confidence_score(consensus_probs, q["score"], meta)
-        resultat["probabiliteVictoireEquipe1"] = round(consensus_probs["V1"], 3)
-        resultat["probabiliteMatchNul"] = round(consensus_probs["NUL"], 3)
-        resultat["probabiliteVictoireEquipe2"] = round(consensus_probs["V2"], 3)
-        resultat["confianceGlobale"] = round(max(consensus_probs.values()), 3)
-        resultat["scoreConfiance"] = conf["score"]
-        resultat["niveauConfiance"] = conf["niveau"]
-        resultat["qualiteDonnees"] = q
-        resultat["consensus"] = {**meta, "probabilites": {k: round(v, 3) for k, v in consensus_probs.items()}}
-        resultat["sourcesUtilisees"] = sorted(set(
-            [x.get("source") for x in (resultat.get("_stats1") or []) if isinstance(x, dict)] +
-            [x.get("source") for x in (resultat.get("_stats2") or []) if isinstance(x, dict)] +
-            ([ext.get("source")] if ext else [])
-        ) - {None})
-        resultat["alertesAnalyse"] = []
-        if q["score"] < 45:
-            resultat["alertesAnalyse"].append("Données limitées : confiance réduite.")
-        if meta.get("accord") == "FAIBLE":
-            resultat["alertesAnalyse"].append("Les modèles internes et externes divergent fortement.")
-    except Exception:
-        pass
 
     # Infos brutes en plus, utiles pour comprendre le calcul en détail
     resultat["_debug_stats1_sources"] = stats1_sources
@@ -1368,44 +959,6 @@ class BacktestRequest(BaseModel):
     poids_lissage: Optional[float] = None
     diviseur_echelle_elo: Optional[float] = None
     coefficient_attenuation_elo: Optional[float] = None
-
-
-def _log_loss_1x2(probs: Dict[str, float], reel: str) -> float:
-    """Log loss multiclasses, bornée pour éviter log(0)."""
-    p = max(1e-6, min(1.0, float(probs.get(reel, 0.0))))
-    return -math.log(p)
-
-
-def _brier_1x2(probs: Dict[str, float], reel: str) -> float:
-    """Brier multiclasses : plus bas = meilleur."""
-    return sum((float(probs.get(k, 0.0)) - (1.0 if k == reel else 0.0)) ** 2 for k in ("V1", "NUL", "V2"))
-
-
-def _calibration_bins(details: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Calibration simple par probabilité du résultat effectivement prédit."""
-    bins = []
-    bornes = [(0.50, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]
-    for bas, haut in bornes:
-        lignes = []
-        for d in details:
-            if d.get("erreur") or not d.get("probabilites"):
-                continue
-            probs = d["probabilites"]
-            pred = d.get("predit")
-            p = float(probs.get(pred, 0.0))
-            if bas <= p < haut:
-                lignes.append(d)
-        n = len(lignes)
-        if n:
-            succes = sum(1 for d in lignes if d.get("correct"))
-            confiance_moyenne = sum(float(d["probabilites"][d["predit"]]) for d in lignes) / n
-            bins.append({
-                "intervalle": f"{int(bas*100)}-{int((haut if haut < 1.01 else 1.0)*100)}%",
-                "echantillon": n,
-                "confiance_moyenne": round(confiance_moyenne, 3),
-                "reussite_reelle": round(succes / n, 3),
-            })
-    return bins
 
 
 @app.post("/debug/backtest", tags=["✏️ Admin — Actions"])
@@ -1490,10 +1043,6 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
             "resultatReel": m.resultatReel,
             "correct": predit == m.resultatReel,
         }
-        detail["metriques_probabilistes"] = {
-            "brier_1x2": round(_brier_1x2(detail["probabilites"], m.resultatReel), 5),
-            "log_loss_1x2": round(_log_loss_1x2(detail["probabilites"], m.resultatReel), 5),
-        }
 
         # Vérification BTTS/over-under, uniquement si le score exact a
         # été fourni (sinon on ne peut tout simplement pas savoir).
@@ -1548,10 +1097,6 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
                 "taux_reussite": round(corrects_marche / len(avec_score), 3),
             }
 
-    metriques = [d["metriques_probabilistes"] for d in details if "metriques_probabilistes" in d]
-    brier_moyen = sum(m["brier_1x2"] for m in metriques) / len(metriques) if metriques else None
-    log_loss_moyen = sum(m["log_loss_1x2"] for m in metriques) / len(metriques) if metriques else None
-
     return {
         "parametres_utilises": {
             "rho_dixon_coles": rho,
@@ -1564,12 +1109,6 @@ async def debug_backtest(requete: BacktestRequest, uid: str = Depends(auth.utili
         "corrects_1x2": corrects_1x2,
         "taux_reussite_1x2": round(corrects_1x2 / total_valides, 3) if total_valides > 0 else None,
         "stats_marches_avances": stats_marches,
-        "metriques_probabilistes": {
-            "brier_moyen_1x2": round(brier_moyen, 5) if brier_moyen is not None else None,
-            "log_loss_moyen_1x2": round(log_loss_moyen, 5) if log_loss_moyen is not None else None,
-            "calibration": _calibration_bins(details),
-            "lecture": "Brier et Log Loss : plus bas = meilleur. La calibration compare la confiance affichee a la reussite reelle.",
-        },
         "details": details,
     }
 

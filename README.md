@@ -229,3 +229,42 @@ complément pour corriger un cas raté manuellement.
   sources à cause d'un trafic trop élevé.
 - La vérification des résultats réels est manuelle (voir section 5) —
   pas encore d'automatisation.
+
+
+## Sources de matchs (liste J / J+1)
+
+`/matchs` fusionne CINQ fournisseurs en parallèle (priorité croissante : SportAPI7, OpenLigaDB,
+TheSportsDB, free-api-live-football-data, football-data.org). Un même match remonté sous des
+orthographes différentes ("Man City" / "Manchester City FC") est fusionné (`app/normalisation.py`,
+coups d'envoi à moins de 90 min, équipes ≥ 82 % similaires, marqueurs féminines/jeunes/réserves
+identiques). Chaque match porte `sources` et `nb_sources`.
+
+Chaque source est protégée par un disjoncteur (`app/sources/sante.py`) : 3 échecs de suite = pause
+de 30 min. État visible via `GET /debug/sources` (admin).
+
+⚠️ `GET /debug/sportapi7` teste le chemin de liste par date de SportAPI7, **non vérifié** (voir
+`app/sources/sportapi7.py`). Tests : `python -m unittest discover -s tests -t .`
+
+
+## Module esport (ajout)
+
+Package `app/esport/` + routes `/esport/*` (branchées dans main.py par une seule ligne ; le football n'est pas modifié).
+Source : Esport API (RapidAPI, hôte esportapi1.p.rapidapi.com), même variable `RAPIDAPI_KEY`.
+Jeux couverts (3) : Counter Strike (1572), Dota 2 (1570), LoL (1571).
+
+⚠️ **Plan gratuit observé : 50 requêtes/jour.** Tout est conçu autour de ce budget (cache 3 min à 7 j, réponses
+vides 204 mises en cache, compteur réel lu dans les en-têtes, réserves 15 (fond) / 2 (actions utilisateur)).
+Un suivi en direct de plusieurs matchs en continu reste impossible à ce volume ; il faudra un plan payant.
+
+Découverte (endpoints vérifiés sur captures) : `category/{id}/events/{j}/{m}/{a}` (tous les matchs d'un jeu pour une
+date, 1 appel), `matches/live` (direct, tous jeux), `search/{texte}`. La date de l'API suit un fuseau ≈ UTC+9 (déduit).
+Coût d'une liste complète : au plus 7 appels (1 direct + 2 jours × 3 jeux), en cache 3 min / 3 h / 8 h.
+
+- `GET /esport/jeux`, `GET /esport/matchs?jeu=csgo`, `GET /esport/match/{id}?avec=cartes,duel,votes`
+- `GET /esport/recherche?q=nom` (équipes, 1 appel, cache 24 h)
+- `POST /esport/pronostic` (partage le quota gratuit quotidien du football ; pronostic FIGÉ au premier calcul)
+- `GET /esport/bilan` (précision réelle des pronostics figés, vérifiés après coup)
+- Admin : `POST /esport/equipes {teamId}` (favoris), `DELETE /esport/equipes/{id}`, `POST /esport/equipes/importer-connues`
+
+Les équipes suivies sont des FAVORIS (étoile côté appli) : elles ne servent plus à découvrir les matchs.
+Tests : `python -m unittest discover -s tests -t .`

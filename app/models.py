@@ -1,11 +1,12 @@
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
 
 class MatchAnalysisRequest(BaseModel):
     equipe1: str
     equipe2: str
     typeMatch: str
+    fixtureId: Optional[int] = None  # id du match dans /matchs — active le contexte (classement, H2H)
 
 
 class ScoreProbable(BaseModel):
@@ -32,33 +33,4 @@ class MatchAnalysisResponse(BaseModel):
     probabiliteOver25: float
     scoresProbables: List[ScoreProbable]
     vip: bool  # true si l'utilisateur a accès aux marchés avancés (au-delà du 1X2)
-    pronosticsRestantsAujourdhui: Optional[int] = None
-    # Enrichissements provenant des endpoints RapidAPI — facultatifs.
-    predictionExterne: Optional[str] = None
-    sourcePredictionExterne: Optional[str] = None
-    probabilitePredictionExterne: Optional[float] = None
-    confianceGlobale: Optional[float] = None
-    scoreConfiance: Optional[int] = None
-    niveauConfiance: Optional[str] = None
-    qualiteDonnees: Optional[Dict[str, Any]] = None
-    consensus: Optional[Dict[str, Any]] = None
-    sourcesUtilisees: List[str] = []
-    alertesAnalyse: List[str] = []
-
-class MatchDetailResponse(BaseModel):
-    fixture_id: str
-    event_id: Optional[int] = None
-    date: Optional[str] = None
-    league: Optional[str] = None
-    equipe1: str
-    equipe2: str
-    statut: Optional[Dict[str, Any]] = None
-    score: List[Dict[str, Any]] = []
-    statistiques: List[Dict[str, Any]] = []
-    statistiquesTop: List[Dict[str, Any]] = []
-    confrontations: Optional[Dict[str, Any]] = None
-    h2hRecents: List[Dict[str, Any]] = []
-    compositions: Dict[str, Any] = {}
-    formations: Dict[str, Any] = {}
-    detail: Optional[Dict[str, Any]] = None
-
+    pronosticsRestantsAujourdhui: Optional[int] = None  # null si VIP (illimité) ou DB non configurée

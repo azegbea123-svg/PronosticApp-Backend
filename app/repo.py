@@ -25,6 +25,8 @@ COLLECTION_PAIEMENTS = "paiements_en_attente"
 COLLECTION_PREDICTIONS_BACKTEST = "predictions_backtest"
 COLLECTION_MATCHS_JOUR = "matchs_jour"
 COLLECTION_MATCHS_JOUR_META = "matchs_jour_meta"
+COLLECTION_REFERENCE = "reference"  # documents uniques (annuaire des championnats...)
+DOC_ANNUAIRE_LIGUES = "annuaire_ligues"
 
 
 def _maintenant():
@@ -330,11 +332,14 @@ def enregistrer_matchs_jour(jour_iso: str, matchs: List[Dict[str, Any]]) -> None
     client = db.get_client()
     if not client:
         return
-    batch = client.batch()
-    for m in matchs:
-        ref = client.collection(COLLECTION_MATCHS_JOUR).document(str(m["fixture_id"]))
-        batch.set(ref, {**m, "jour": jour_iso, "maj_le": _maintenant()})
-    batch.commit()
+    # Firestore limite un batch à 500 écritures : une journée mondiale peut
+    # dépasser ce nombre, d'où le découpage par lots de 400.
+    for debut in range(0, len(matchs), 400):
+        batch = client.batch()
+        for m in matchs[debut : debut + 400]:
+            ref = client.collection(COLLECTION_MATCHS_JOUR).document(str(m["fixture_id"]))
+            batch.set(ref, {**m, "jour": jour_iso, "maj_le": _maintenant()})
+        batch.commit()
 
 
 def lister_matchs_jour(jour_iso: str) -> List[Dict[str, Any]]:
@@ -379,3 +384,42 @@ def marquer_disponibilite_match(fixture_id: int, disponible: bool) -> None:
     client.collection(COLLECTION_MATCHS_JOUR).document(str(fixture_id)).update(
         {"donneesDisponibles": disponible}
     )
+
+
+def obtenir_match(fixture_id: int) -> Optional[Dict[str, Any]]:
+    """Un match de la liste du jour, par son fixture_id stable."""
+    client = db.get_client()
+    if not client:
+        return None
+    doc = client.collection(COLLECTION_MATCHS_JOUR).document(str(fixture_id)).get()
+    return doc.to_dict() if doc.exists else None
+
+
+def maj_champs_matchs(modifications: List[Dict[str, Any]]) -> None:
+    """Met à jour quelques champs de plusieurs matchs en un seul batch.
+    Chaque élément : {"fixture_id": int, "champs": {...}}. Sert au score en
+    direct — on n'écrit QUE les matchs dont le score ou le statut a changé."""
+    client = db.get_client()
+    if not client or not modifications:
+        return
+    batch = client.batch()
+    for mod in modifications:
+        ref = client.collection(COLLECTION_MATCHS_JOUR).document(str(mod["fixture_id"]))
+        batch.set(ref, mod["champs"], merge=True)
+    batch.commit()
+
+
+def charger_annuaire_ligues() -> Optional[Dict[str, Any]]:
+    client = db.get_client()
+    if not client:
+        return None
+    doc = client.collection(COLLECTION_REFERENCE).document(DOC_ANNUAIRE_LIGUES).get()
+    return doc.to_dict() if doc.exists else None
+
+
+def enregistrer_annuaire_ligues(contenu: Dict[str, Any]) -> None:
+    """Un seul document (≈ quelques milliers d'entrées max, bien sous la limite de 1 Mo)."""
+    client = db.get_client()
+    if not client:
+        return
+    client.collection(COLLECTION_REFERENCE).document(DOC_ANNUAIRE_LIGUES).set(contenu)

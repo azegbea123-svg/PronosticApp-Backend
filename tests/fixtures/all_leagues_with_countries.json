@@ -1,0 +1,77 @@
+{
+ "status": "success",
+ "response": {
+  "leagues": [
+   {
+    "ccode": "ENG",
+    "name": "England",
+    "leagues": [
+     {
+      "id": 47,
+      "name": "Premier League",
+      "localizedName": "Premier League",
+      "ccode": "ENG",
+      "logo": "https://images.fotmob.com/image_resources/logo/leaguelogo/dark/47.png"
+     },
+     {
+      "id": 48,
+      "name": "Championship",
+      "localizedName": "Championship",
+      "ccode": "ENG",
+      "logo": "https://images.fotmob.com/image_resources/logo/leaguelogo/dark/48.png"
+     },
+     {
+      "id": 108,
+      "name": "League One",
+      "localizedName": "League One",
+      "ccode": "ENG",
+      "logo": "https://images.fotmob.com/image_resources/logo/leaguelogo/dark/108.png"
+     }
+    ],
+    "localizedName": "England"
+   },
+   {
+    "ccode": "FRA",
+    "name": "France",
+    "leagues": [
+     {
+      "id": 53,
+      "name": "Ligue 1",
+      "localizedName": "Ligue 1",
+      "ccode": "FRA",
+      "logo": "https://images.fotmob.com/image_resources/logo/leaguelogo/dark/53.png"
+     },
+     {
+      "id": 110,
+      "name": "Ligue 2",
+      "localizedName": "Ligue 2",
+      "ccode": "FRA",
+      "logo": "https://images.fotmob.com/image_resources/logo/leaguelogo/dark/110.png"
+     },
+     {
+      "id": 8970,
+      "name": "Ligue 3",
+      "localizedName": "Ligue 3",
+      "ccode": "FRA",
+      "logo": "https://images.fotmob.com/image_resources/logo/leaguelogo/dark/8970.png"
+     }
+    ],
+    "localizedName": "France"
+   },
+   {
+    "ccode": "GHA",
+    "name": "Ghana",
+    "leagues": [
+     {
+      "id": 522,
+      "name": "Premier League",
+      "localizedName": "Premier League",
+      "ccode": "GHA",
+      "logo": "https://images.fotmob.com/image_resources/logo/leaguelogo/dark/522.png"
+     }
+    ],
+    "localizedName": "Ghana"
+   }
+  ]
+ }
+}

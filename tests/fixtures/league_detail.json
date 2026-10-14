@@ -1,0 +1,39 @@
+{
+ "status": "success",
+ "response": {
+  "leagues": {
+   "id": 42,
+   "type": "league",
+   "name": "Champions League",
+   "selectedSeason": "2026/2027",
+   "latestSeason": "2026/2027",
+   "shortName": "Champions League",
+   "country": "INT",
+   "gender": "male",
+   "faqJSONLD": null,
+   "breadcrumbJSONLD": {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+     {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": "https://www.fotmob.com"
+     },
+     {
+      "@type": "ListItem",
+      "position": 2,
+      "name": "Champions League",
+      "item": "https://www.fotmob.com/leagues/42/overview/champions-league"
+     }
+    ]
+   },
+   "canSyncCalendar": true,
+   "hasFixtureDifficulty": false,
+   "leagueColor": "#162E58",
+   "dataProvider": "enet",
+   "seopath": "champions-league"
+  }
+ }
+}

@@ -1,0 +1,159 @@
+{
+ "status": "success",
+ "response": [
+  {
+   "ccode": "DEN",
+   "id": 242,
+   "primaryId": 242,
+   "name": "DBU Pokalen",
+   "matches": [
+    {
+     "id": 4647580,
+     "leagueId": 242,
+     "time": "07.11.2024 18:30",
+     "home": {
+      "id": 9952,
+      "score": 2,
+      "name": "Skive",
+      "longName": "Skive"
+     },
+     "away": {
+      "id": 8071,
+      "score": 3,
+      "name": "AGF",
+      "longName": "AGF"
+     },
+     "eliminatedTeamId": null,
+     "statusId": 11,
+     "tournamentStage": "4",
+     "status": {
+      "utcTime": "2024-11-07T17:30:00.000Z",
+      "halfs": {
+       "firstHalfStarted": "07.11.2024 18:29:11",
+       "secondHalfStarted": "07.11.2024 19:29:18",
+       "firstExtraHalfStarted": "07.11.2024 20:23:43",
+       "secondExtraHalfStarted": "07.11.2024 20:44:00"
+      },
+      "periodLength": 45,
+      "finished": true,
+      "started": true,
+      "cancelled": false,
+      "awarded": false,
+      "scoreStr": "2 - 3",
+      "reason": {
+       "short": "AET",
+       "shortKey": "afterextratime_short",
+       "long": "After extra time",
+       "longKey": "afterextra"
+      }
+     },
+     "timeTS": 1731000600000
+    }
+   ],
+   "internalRank": 0,
+   "simpleLeague": false
+  },
+  {
+   "ccode": "POL",
+   "id": 197,
+   "primaryId": 197,
+   "name": "I Liga",
+   "matches": [
+    {
+     "id": 4502359,
+     "leagueId": 197,
+     "time": "07.11.2024 19:00",
+     "home": {
+      "id": 1601,
+      "score": 5,
+      "name": "Ruch Chorzow",
+      "longName": "Ruch Chorzow"
+     },
+     "away": {
+      "id": 273525,
+      "score": 0,
+      "name": "Chrobry Głogów",
+      "longName": "Chrobry Głogów"
+     },
+     "eliminatedTeamId": null,
+     "statusId": 6,
+     "tournamentStage": "16",
+     "status": {
+      "utcTime": "2024-11-07T18:00:00.000Z",
+      "halfs": {
+       "firstHalfStarted": "07.11.2024 19:01:19",
+       "secondHalfStarted": "07.11.2024 20:03:50"
+      },
+      "periodLength": 45,
+      "finished": true,
+      "started": true,
+      "cancelled": false,
+      "awarded": false,
+      "scoreStr": "5 - 0",
+      "reason": {
+       "short": "FT",
+       "shortKey": "fulltime_short",
+       "long": "Full-Time",
+       "longKey": "finished"
+      }
+     },
+     "timeTS": 1731002400000
+    }
+   ],
+   "internalRank": 9,
+   "simpleLeague": false
+  },
+  {
+   "ccode": "ALG",
+   "id": 516,
+   "primaryId": 516,
+   "name": "Ligue 1",
+   "matches": [
+    {
+     "id": 4631000,
+     "leagueId": 516,
+     "time": "07.11.2024 19:30",
+     "home": {
+      "id": 101636,
+      "score": 1,
+      "name": "MC Oran",
+      "longName": "MC Oran"
+     },
+     "away": {
+      "id": 45655,
+      "score": 0,
+      "name": "ES Setif",
+      "redCards": 1,
+      "longName": "ES Setif"
+     },
+     "eliminatedTeamId": null,
+     "statusId": 6,
+     "tournamentStage": "8",
+     "status": {
+      "utcTime": "2024-11-07T18:30:00.000Z",
+      "numberOfAwayRedCards": 1,
+      "halfs": {
+       "firstHalfStarted": "07.11.2024 19:37:47",
+       "secondHalfStarted": "07.11.2024 20:47:05"
+      },
+      "periodLength": 45,
+      "finished": true,
+      "started": true,
+      "cancelled": false,
+      "awarded": false,
+      "scoreStr": "1 - 0",
+      "reason": {
+       "short": "FT",
+       "shortKey": "fulltime_short",
+       "long": "Full-Time",
+       "longKey": "finished"
+      }
+     },
+     "timeTS": 1731004200000
+    }
+   ],
+   "internalRank": 0,
+   "simpleLeague": false
+  }
+ ]
+}

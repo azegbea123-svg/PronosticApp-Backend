@@ -1,0 +1,182 @@
+{
+ "event": {
+  "eventState": {},
+  "tournament": {
+   "name": "Eerste Divisie",
+   "slug": "eerste-divisie",
+   "category": {
+    "name": "Netherlands",
+    "slug": "netherlands",
+    "sport": {
+     "name": "Football",
+     "slug": "football",
+     "id": 1
+    },
+    "priority": 0,
+    "country": {
+     "alpha2": "NL",
+     "alpha3": "NLD",
+     "name": "Netherlands",
+     "slug": "netherlands"
+    },
+    "id": 35,
+    "flag": "netherlands",
+    "alpha2": "NL"
+   },
+   "uniqueTournament": {
+    "name": "Eerste Divisie",
+    "slug": "eerste-divisie",
+    "primaryColorHex": "#b0192e",
+    "secondaryColorHex": "#a3a3a3",
+    "category": {
+     "name": "Netherlands",
+     "slug": "netherlands",
+     "sport": {
+      "name": "Football",
+      "slug": "football",
+      "id": 1
+     },
+     "priority": 0,
+     "country": {
+      "alpha2": "NL",
+      "alpha3": "NLD",
+      "name": "Netherlands",
+      "slug": "netherlands"
+     },
+     "id": 35,
+     "flag": "netherlands",
+     "alpha2": "NL"
+    },
+    "userCount": 27246,
+    "hasRounds": true,
+    "hasPerformanceGraphFeature": true,
+    "liveActivityEnabled": true,
+    "country": {},
+    "id": 131,
+    "hasEventPlayerStatistics": true,
+    "displayInverseHomeAwayTeams": false
+   },
+   "priority": 326,
+   "isGroup": false,
+   "competitionType": 1,
+   "isLive": false,
+   "id": 40
+  },
+  "season": {
+   "name": "Eerste Divisie 18/19",
+   "year": "18/19",
+   "editor": false,
+   "id": 17824
+  },
+  "roundInfo": {
+   "round": 9
+  },
+  "customId": "kjbsvjb",
+  "status": {
+   "code": 100,
+   "description": "Ended",
+   "type": "finished"
+  },
+  "winnerCode": 1,
+  "homeTeam": {
+   "name": "Sparta Rotterdam",
+   "slug": "sparta-rotterdam",
+   "shortName": "Sparta",
+   "gender": "M",
+   "sport": {
+    "name": "Football",
+    "slug": "football",
+    "id": 1
+   },
+   "userCount": 41235,
+   "nameCode": "SPA",
+   "class": 0,
+   "disabled": false,
+   "national": false,
+   "type": 0,
+   "country": {
+    "alpha2": "NL",
+    "alpha3": "NLD",
+    "name": "Netherlands",
+    "slug": "netherlands"
+   },
+   "id": 2960,
+   "fullName": "Sparta Rotterdam",
+   "subTeams": [],
+   "teamColors": {
+    "primary": "#ffffff",
+    "secondary": "#ff0000",
+    "text": "#ff0000"
+   },
+   "foundationDateTimestamp": -2579817600,
+   "timeActive": []
+  },
+  "awayTeam": {
+   "name": "SC Cambuur",
+   "slug": "sc-cambuur",
+   "shortName": "Cambuur",
+   "gender": "M",
+   "sport": {
+    "name": "Football",
+    "slug": "football",
+    "id": 1
+   },
+   "userCount": 34217,
+   "nameCode": "CAM",
+   "disabled": false,
+   "national": false,
+   "type": 0,
+   "country": {
+    "alpha2": "NL",
+    "alpha3": "NLD",
+    "name": "Netherlands",
+    "slug": "netherlands"
+   },
+   "id": 2970,
+   "fullName": "SC Cambuur",
+   "subTeams": [],
+   "teamColors": {
+    "primary": "#ffff00",
+    "secondary": "#0099ff",
+    "text": "#0099ff"
+   },
+   "foundationDateTimestamp": -174700800,
+   "timeActive": []
+  },
+  "homeScore": {
+   "current": 3,
+   "display": 3,
+   "period1": 2,
+   "period2": 1,
+   "normaltime": 3
+  },
+  "awayScore": {
+   "current": 0,
+   "display": 0,
+   "period1": 0,
+   "period2": 0,
+   "normaltime": 0
+  },
+  "coverage": 1,
+  "time": {
+   "injuryTime1": 3,
+   "injuryTime2": 3,
+   "currentPeriodStartTimestamp": 1539526959
+  },
+  "hasGlobalHighlights": false,
+  "detailId": 6,
+  "crowdsourcingDataDisplayEnabled": false,
+  "id": 7881945,
+  "defaultPeriodCount": 2,
+  "defaultPeriodLength": 45,
+  "defaultOvertimeLength": 15,
+  "slug": "sc-cambuur-sparta-rotterdam",
+  "currentPeriodStartTimestamp": 1539526959,
+  "startTimestamp": 1539520200,
+  "finalResultOnly": false,
+  "feedLocked": false,
+  "seasonStatisticsType": "overall",
+  "showTotoPromo": true,
+  "isEditor": false
+ }
+}

@@ -1,0 +1,92 @@
+{
+ "status": "success",
+ "response": {
+  "live": [
+   {
+    "id": 5190041,
+    "leagueId": 921414,
+    "time": "03.10.2026 11:30",
+    "home": {
+     "id": 4499,
+     "score": 6,
+     "name": "Arna-Bjørnar (W)",
+     "longName": "Arna-Bjørnar (W)"
+    },
+    "away": {
+     "id": 67293,
+     "score": 0,
+     "name": "Grei Kvinner Elite (W)",
+     "longName": "Grei Kvinner Elite (W)"
+    },
+    "eliminatedTeamId": null,
+    "statusId": 3,
+    "tournamentStage": "20",
+    "status": {
+     "utcTime": "2026-10-03T09:30:00.000Z",
+     "halfs": {
+      "firstHalfStarted": "03.10.2026 11:33:20",
+      "secondHalfStarted": "03.10.2026 12:31:07"
+     },
+     "periodLength": 45,
+     "finished": false,
+     "started": true,
+     "cancelled": false,
+     "ongoing": true,
+     "scoreStr": "6 - 0",
+     "liveTime": {
+      "short": "61‎’‎",
+      "shortKey": "",
+      "long": "60:41",
+      "longKey": "",
+      "maxTime": 90,
+      "basePeriod": 90,
+      "addedTime": 0
+     }
+    },
+    "timeTS": 1791019800000
+   },
+   {
+    "id": 6366440,
+    "leagueId": 944026,
+    "time": "03.10.2026 12:30",
+    "home": {
+     "id": 300702,
+     "score": 0,
+     "name": "South Korea U23",
+     "longName": "South Korea U23"
+    },
+    "away": {
+     "id": 298067,
+     "score": 0,
+     "name": "Japan U23",
+     "longName": "Japan U23"
+    },
+    "eliminatedTeamId": null,
+    "statusId": 2,
+    "tournamentStage": "final",
+    "status": {
+     "utcTime": "2026-10-03T10:30:00.000Z",
+     "halfs": {
+      "firstHalfStarted": "03.10.2026 12:30:51"
+     },
+     "periodLength": 45,
+     "finished": false,
+     "started": true,
+     "cancelled": false,
+     "ongoing": true,
+     "scoreStr": "0 - 0",
+     "liveTime": {
+      "short": "16‎’‎",
+      "shortKey": "",
+      "long": "15:57",
+      "longKey": "",
+      "maxTime": 45,
+      "basePeriod": 45,
+      "addedTime": 0
+     }
+    },
+    "timeTS": 1791023400000
+   }
+  ]
+ }
+}

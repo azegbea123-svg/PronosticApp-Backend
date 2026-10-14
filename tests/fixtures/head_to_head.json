@@ -1,0 +1,78 @@
+{
+ "status": "success",
+ "response": {
+  "lineup": {
+   "summary": [
+    1,
+    0,
+    1
+   ],
+   "matches": [
+    {
+     "time": {
+      "utcTime": "2022-07-09T12:30:00.000Z"
+     },
+     "league": {
+      "name": "Club Friendlies",
+      "id": "489"
+     },
+     "home": {
+      "name": "Salzburg",
+      "id": "10013"
+     },
+     "status": {
+      "utcTime": "2022-07-09T12:30:00.000Z",
+      "finished": true,
+      "started": true,
+      "cancelled": false,
+      "awarded": false,
+      "scoreStr": "1 - 2",
+      "reason": {
+       "short": "FT",
+       "shortKey": "fulltime_short",
+       "long": "Full-Time",
+       "longKey": "finished"
+      }
+     },
+     "finished": false,
+     "away": {
+      "name": "Feyenoord",
+      "id": "10235"
+     }
+    },
+    {
+     "time": {
+      "utcTime": "2019-07-12T16:30:00.000Z"
+     },
+     "league": {
+      "name": "Club Friendlies",
+      "id": "489"
+     },
+     "home": {
+      "name": "Salzburg",
+      "id": "10013"
+     },
+     "status": {
+      "utcTime": "2019-07-12T16:30:00.000Z",
+      "finished": true,
+      "started": true,
+      "cancelled": false,
+      "awarded": false,
+      "scoreStr": "3 - 1",
+      "reason": {
+       "short": "FT",
+       "shortKey": "fulltime_short",
+       "long": "Full-Time",
+       "longKey": "finished"
+      }
+     },
+     "finished": false,
+     "away": {
+      "name": "Feyenoord",
+      "id": "10235"
+     }
+    }
+   ]
+  }
+ }
+}
