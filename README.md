@@ -252,19 +252,23 @@ Package `app/esport/` + routes `/esport/*` (branchées dans main.py par une seul
 Source : Esport API (RapidAPI, hôte esportapi1.p.rapidapi.com), même variable `RAPIDAPI_KEY`.
 Jeux couverts (3) : Counter Strike (1572), Dota 2 (1570), LoL (1571).
 
-⚠️ **Plan gratuit observé : 50 requêtes/jour.** Tout est conçu autour de ce budget (cache 3 min à 7 j, réponses
-vides 204 mises en cache, compteur réel lu dans les en-têtes, réserves 15 (fond) / 2 (actions utilisateur)).
-Un suivi en direct de plusieurs matchs en continu reste impossible à ce volume ; il faudra un plan payant.
+⚠️ **Plan gratuit observé : 50 requêtes/jour.** Conception autour de ce budget :
+- **Cache persistant** (collection `esport_cache`) : un redémarrage de l'hébergeur ne re-dépense plus rien.
+- Requêtes envoyées par lots de 2 (évite le 429 « trop de requêtes d'un coup », qui ne bloque qu'1 minute).
+- Direct : cache 10 min, plafonné à 10 appels réels par jour. Listes : cache 3 h (aujourd'hui) / 8 h (demain).
+- Réserve : les tâches de fond s'arrêtent à 15 requêtes restantes ; le rattrapage de l'historique n'utilise que
+  l'excédent (tant qu'il reste 30 requêtes ou plus) et se met en pause 10 min après un échec.
 
-Découverte (endpoints vérifiés sur captures) : `category/{id}/events/{j}/{m}/{a}` (tous les matchs d'un jeu pour une
-date, 1 appel), `matches/live` (direct, tous jeux), `search/{texte}`. La date de l'API suit un fuseau ≈ UTC+9 (déduit).
-Coût d'une liste complète : au plus 7 appels (1 direct + 2 jours × 3 jeux), en cache 3 min / 3 h / 8 h.
+**Pronostics sans appel API.** Chaque liste du jour contient aussi les matchs terminés : on les mémorise
+(`esport_resultats`), on rattrape peu à peu 45 jours d'historique avec le quota excédentaire, et un classement Elo
+(avec ajustement à la force des adversaires) en tire le pronostic de CHAQUE match, affiché directement dans la liste.
+Le pronostic est figé avant le coup d'envoi ; `GET /esport/bilan` le confronte au résultat, sans aucun appel API.
 
-- `GET /esport/jeux`, `GET /esport/matchs?jeu=csgo`, `GET /esport/match/{id}?avec=cartes,duel,votes`
-- `GET /esport/recherche?q=nom` (équipes, 1 appel, cache 24 h)
-- `POST /esport/pronostic` (partage le quota gratuit quotidien du football ; pronostic FIGÉ au premier calcul)
-- `GET /esport/bilan` (précision réelle des pronostics figés, vérifiés après coup)
+- `GET /esport/jeux`, `GET /esport/matchs?jeu=csgo` (matchs + `pronostic` + `diagnostic` + `historique`)
+- `GET /esport/match/{id}?avec=cartes,duel,votes` (détail, 1 à 4 appels API : à la demande seulement)
+- `GET /esport/recherche?q=nom`, `GET /esport/bilan`
 - Admin : `POST /esport/equipes {teamId}` (favoris), `DELETE /esport/equipes/{id}`, `POST /esport/equipes/importer-connues`
 
-Les équipes suivies sont des FAVORIS (étoile côté appli) : elles ne servent plus à découvrir les matchs.
+`diagnostic` détaille chaque requête de la liste (ok, cache, vide, échec, ignoré) : à consulter dans /docs si une liste est incomplète.
+Nettoyage d'anciennes données de test : `python scripts/nettoyer_tests_esport.py` (simulation par défaut).
 Tests : `python -m unittest discover -s tests -t .`
