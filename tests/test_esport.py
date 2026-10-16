@@ -467,11 +467,32 @@ class Elo(unittest.TestCase):
         serre = elo.calculer([m_compact(1, 1, 2, 2, 1, 1)])["notes"][1]
         self.assertGreater(net, serre)
 
-    def test_pas_de_pronostic_sans_historique(self):
-        c = elo.calculer([m_compact(1, 1, 2, 2, 0, 1)])
-        r = elo.pronostiquer(c, 1, 2, 3, NOW_)
-        self.assertIn("Historique insuffisant", r["raison"])
-        self.assertIn("raison", elo.pronostiquer(c, 1, 999, 3, NOW_))
+    def test_toujours_un_pronostic_meme_sans_historique(self):
+        c = elo.calculer([])
+        p = elo.pronostiquer(c, 1, 2, 3, NOW_)["pronostic"]
+        self.assertAlmostEqual(p["p1"], 0.5, places=2)
+        self.assertEqual(p["favori"], 0)                 # aucun favori : match équilibré
+        self.assertEqual(p["confiance"], "faible")        # honnête : on ne sait rien
+        self.assertFalse(p["donnees_suffisantes"])
+        self.assertIsNone(p["details"]["jours_depuis_dernier_match"])
+
+    def test_equipe_connue_contre_inconnue_reste_informatif(self):
+        c = elo.calculer([m_compact(i, 1, 2, 2, 0, NOW_ - i * 86400) for i in range(10)])
+        p = elo.pronostiquer(c, 1, 999, 3, NOW_)["pronostic"]  # 999 n'a jamais joué : départ neutre (1500)
+        self.assertGreater(p["p1"], 0.5)
+        self.assertEqual(p["favori"], 1)
+        self.assertFalse(p["donnees_suffisantes"])           # une des deux équipes est inconnue
+        self.assertEqual(p["confiance"], "faible")
+
+    def test_donnees_suffisantes_des_deux_matchs_chacune(self):
+        c = elo.calculer([m_compact(1, 1, 2, 2, 0, NOW_ - 86400), m_compact(2, 1, 2, 2, 1, NOW_ - 2 * 86400)])
+        self.assertTrue(elo.pronostiquer(c, 1, 2, 3, NOW_)["pronostic"]["donnees_suffisantes"])
+
+    def test_favori_equilibre_ou_nul(self):
+        self.assertEqual(elo.favori(0.51, 0.0, 0.49), 0)
+        self.assertEqual(elo.favori(0.60, 0.0, 0.40), 1)
+        self.assertEqual(elo.favori(0.30, 0.0, 0.70), 2)
+        self.assertEqual(elo.favori(0.20, 0.50, 0.30), 3)
 
     def test_pronostic_symetrique_favori_et_format(self):
         ms = [m_compact(i, 1, 2, 2, 0, NOW_ - (40 - i) * 86400) for i in range(25)]
@@ -548,7 +569,7 @@ class PronosticsDansLaListe(Isole):
         t0 = time.time()
         r = self.lister(self.table([ev_liste(1, "csgo", t0 + 3600, "notstarted", e1=10, e2=12)]))
         m = r["matchs"][0]
-        self.assertIsNone(m["pronostic_raison"])
+        self.assertNotIn("pronostic_raison", m)
         p = m["pronostic"]
         self.assertGreater(p["p1"], 0.6)
         self.assertEqual(p["favori"], 1)
@@ -567,10 +588,15 @@ class PronosticsDansLaListe(Isole):
         self.assertEqual(len(avec), len(sans))  # avoir un historique ne change pas le nombre d'appels
         self.assertLessEqual(len(avec), 7)
 
-    def test_historique_insuffisant_donne_une_raison_et_pas_un_faux_50_pour_cent(self):
+    def test_sans_historique_le_pronostic_est_quand_meme_la_et_honnete(self):
         r = self.lister(self.table([ev_liste(1, "csgo", time.time() + 3600, "notstarted", e1=10, e2=12)]))
-        self.assertIsNone(r["matchs"][0]["pronostic"])
-        self.assertIn("insuffisant", r["matchs"][0]["pronostic_raison"])
+        m = r["matchs"][0]
+        self.assertNotIn("pronostic_raison", m)           # plus aucune mention « indisponible »
+        p = m["pronostic"]
+        self.assertIsNotNone(p)
+        self.assertEqual(p["favori"], 0)                  # équilibré
+        self.assertEqual(p["confiance"], "faible")
+        self.assertFalse(p["donnees_suffisantes"])
 
     def test_pronostic_fige_au_premier_calcul(self):
         self.semer_historique()
@@ -605,19 +631,6 @@ class PronosticsDansLaListe(Isole):
         m = self.lister(self.table([fini]))["matchs"][0]
         self.assertEqual(m["statut"], "termine")
         self.assertTrue(m["pronostic"]["correct"])  # prédit l'équipe 1, l'équipe 1 a gagné
-
-    def test_resultats_du_jour_memorises_une_seule_fois(self):
-        t0 = time.time()
-        fini = ev_liste(3, "csgo", t0 - 7200, "finished", e1=10, e2=12)
-        fini["winnerCode"] = 1
-        self.lister(self.table([fini]))
-        doc_id = service._id_jour("csgo", self.maintenant)
-        self.assertEqual([m["id"] for m in depot._mem_resultats[doc_id]["matchs"]], [3])
-        depot._mem_resultats[doc_id]["matchs"] = []     # sentinelle : une réécriture la remplacerait
-        service.reinitialiser_memoire()
-        client._cache[self.aujourdhui] = (time.time() + 600, {"events": [fini]})  # la liste est maintenant EN CACHE
-        self.lister(self.table([fini]))
-        self.assertEqual(depot._mem_resultats[doc_id]["matchs"], [])  # liste en cache : rien n'est réécrit
 
     def test_forfait_et_match_sans_vainqueur_ne_nourrissent_pas_le_classement(self):
         ev = ev_liste(4, "csgo", time.time() - 7200, "finished", e1=10, e2=12)
@@ -745,28 +758,27 @@ class DemarrageAFroid(Isole):
         a_venir = ev_liste(1, "csgo", time.time() + 3600, "notstarted", e1=10, e2=12)
 
         async def reseau(chemin, ttl, *, utilisateur=True, persister=True):
-            if chemin == service.CHEMIN_LIVE:
-                return {"events": []}
+            rep = {"events": []}
             for k in range(0, 12):
                 jour = maintenant - timedelta(days=k)
                 if chemin == service._chemin_jour(1572, jour):
-                    return {"events": [a_venir]} if k == 0 else jour_passe(k)
-                if chemin in (service._chemin_jour(1570, jour), service._chemin_jour(1571, jour)):
-                    return {"events": []}
-            return {"events": []}
+                    rep = {"events": [a_venir]} if k == 0 else jour_passe(k)
+            await service.recolter(rep)  # le vrai client le fait pour CHAQUE réponse (crochet RECOLTEUR)
+            return rep
 
         self.remplacer(service.client, "appeler", reseau)
         self.assertEqual(depot._mem_resultats, {})                        # base vide : aucun historique
         premier = lancer(service.lister_matchs())
         m = next(x for x in premier["matchs"] if x["id"] == 1)
-        self.assertIsNotNone(m["pronostic"], m["pronostic_raison"])       # le pronostic est LÀ au premier affichage
+        self.assertIsNotNone(m["pronostic"])                              # le pronostic est LÀ au premier affichage
+        self.assertTrue(m["pronostic"]["donnees_suffisantes"])            # et s'appuie sur les jours rattrapés
         self.assertEqual(m["pronostic"]["favori"], 1)
         self.assertEqual(m["pronostic"]["confiance"], "faible")           # honnête : peu de matchs
         self.assertGreater(premier["historique"]["matchs_memorises"], 0)
         self.assertFalse(premier["historique"]["amorcage_termine"])
         client._quota.update(restant=45, fenetre_fin=time.time() + 100)
 
-    def test_sans_aucune_donnee_la_raison_est_expliquee(self):
+    def test_sans_aucune_donnee_le_pronostic_existe_quand_meme(self):
         a_venir = ev_liste(1, "csgo", time.time() + 3600, "notstarted", e1=10, e2=12)
 
         async def reseau(chemin, ttl, *, utilisateur=True, persister=True):
@@ -774,8 +786,122 @@ class DemarrageAFroid(Isole):
 
         self.remplacer(service.client, "appeler", reseau)
         m = next(x for x in lancer(service.lister_matchs())["matchs"] if x["id"] == 1)
-        self.assertIsNone(m["pronostic"])
-        self.assertIn("insuffisant", m["pronostic_raison"])
+        self.assertNotIn("pronostic_raison", m)
+        self.assertIsNotNone(m["pronostic"])
+        self.assertEqual(m["pronostic"]["favori"], 0)
+        self.assertFalse(m["pronostic"]["donnees_suffisantes"])
+
+
+class Recolte(Isole):
+    """CHAQUE réponse de l'API alimente le cache de résultats qui nourrit les pronostics."""
+
+    def setUp(self):
+        super().setUp()
+        self.remplacer(client, "CLE_RAPIDAPI", "cle")
+        self.remplacer(client.httpx, "AsyncClient", FauxClientHttp)
+        FauxClientHttp.appels, FauxClientHttp.reponses = [], []
+
+    def servir(self, corps, restant=40):
+        FauxClientHttp.reponses = [Rep(200, corps, restant=restant)]
+
+    def termine(self, id_, e1=10, e2=11, ts=None, jeu="csgo"):
+        ev = ev_liste(id_, jeu, ts or time.time() - 7200, "finished", e1=e1, e2=e2)
+        ev["winnerCode"], ev["homeScore"]["current"], ev["awayScore"]["current"] = 1, 2, 0
+        return ev
+
+    def ids_memorises(self):
+        return sorted(m["id"] for m in lancer(service._resultats()))
+
+    def test_une_liste_du_jour_nourrit_le_cache_sans_les_matchs_a_venir(self):
+        self.servir({"events": [self.termine(1), ev_liste(2, "csgo", time.time() + 3600, "notstarted")]})
+        lancer(client.appeler("/liste", 3600))
+        self.assertEqual(self.ids_memorises(), [1])
+        self.assertTrue(all(k.startswith("vrac_csgo_") for k in depot._mem_resultats))
+
+    def test_detail_d_un_match_et_historique_d_equipe_aussi(self):
+        self.servir({"event": self.termine(5)})
+        lancer(client.appeler("/api/esport/event/5", 120))
+        self.servir({"events": [self.termine(6), self.termine(7, jeu="dota2")], "hasNextPage": True})
+        lancer(client.appeler("/api/esport/team/10/matches/previous/1", 3600))
+        self.servir({"lineup": {"matches": [self.termine(8)]}})  # n'importe quelle forme de réponse
+        lancer(client.appeler("/api/esport/event/x/h2h", 3600))
+        self.assertEqual(self.ids_memorises(), [5, 6, 7, 8])
+        self.assertEqual({k.split("_")[1] for k in depot._mem_resultats}, {"csgo", "dota2"})  # un document par jeu et par semaine
+
+    def test_le_direct_ne_memorise_que_ce_qui_est_termine(self):
+        self.servir({"events": [ev_liste(1, "csgo", time.time() - 600, "inprogress"), self.termine(2)]})
+        lancer(client.appeler(service.CHEMIN_LIVE, 600))
+        self.assertEqual(self.ids_memorises(), [2])
+
+    def test_forfaits_et_matchs_sans_vainqueur_exclus(self):
+        wo = self.termine(1)
+        wo["status"]["description"] = "Walkover"
+        sans = self.termine(2)
+        sans["winnerCode"] = None
+        self.servir({"events": [wo, sans, self.termine(3)]})
+        lancer(client.appeler("/x", 60))
+        self.assertEqual(self.ids_memorises(), [3])
+
+    def test_un_match_deja_recolte_n_ecrit_plus_rien(self):
+        ecritures = []
+        reel = depot.fusionner_resultats
+        self.remplacer(depot, "fusionner_resultats", lambda d, n: (ecritures.append(d), reel(d, n))[1])
+        self.servir({"events": [self.termine(1)]})
+        lancer(client.appeler("/a", 60))
+        self.servir({"events": [self.termine(1)]})
+        lancer(client.appeler("/b", 60))
+        self.assertEqual(len(ecritures), 1)  # la 2e réponse ne contient rien de nouveau
+
+    def test_groupes_par_semaine_sans_confusion_avec_les_marqueurs_de_jour(self):
+        t0 = int(time.time())
+        self.servir({"events": [self.termine(1, ts=t0 - 3600), self.termine(2, ts=t0 - 20 * 86400)]})
+        lancer(client.appeler("/a", 60))
+        self.assertEqual(len([k for k in depot._mem_resultats if k.startswith("vrac_csgo_")]), 2)
+        progression = lancer(service._progression_historique(datetime.now(timezone.utc)))
+        self.assertEqual(progression["jours_couverts"], 0)   # des matchs récoltés ne comptent pas comme « jour traité »
+        self.assertEqual(progression["matchs_memorises"], 2)
+
+    def test_cache_persistant_relu_apres_redemarrage_est_aussi_recolte(self):
+        depot._mem_cache["/liste"] = (time.time() + 3600, json.dumps({"events": [self.termine(1), self.termine(2)]}))
+        self.assertEqual(self.ids_memorises(), [])
+        lancer(client.precharger(["/liste"]))        # démarrage à froid : la liste vient du cache persistant
+        self.assertEqual(self.ids_memorises(), [1, 2])
+        depot._mem_cache["/autre"] = (time.time() + 3600, json.dumps({"events": [self.termine(3)]}))
+        self.assertEqual(lancer(client.appeler("/autre", 60))["events"][0]["id"], 3)   # idem via appeler
+        self.assertEqual(self.ids_memorises(), [1, 2, 3])
+
+    def test_ecritures_simultanees_ne_perdent_aucun_match(self):
+        t0 = int(time.time()) - 3600
+
+        async def deux_en_meme_temps():
+            return await asyncio.gather(
+                service.recolter({"events": [self.termine(1, ts=t0), self.termine(2, ts=t0)]}),
+                service.recolter({"events": [self.termine(3, ts=t0), self.termine(4, ts=t0)]}))
+
+        self.assertEqual(sum(lancer(deux_en_meme_temps())), 4)
+        self.assertEqual(self.ids_memorises(), [1, 2, 3, 4])
+
+    def test_fusion_incrementale_du_depot(self):
+        m1, m2 = m_compact(1, 10, 11, 2, 0, 100), m_compact(2, 10, 11, 2, 1, 200)
+        self.assertEqual(depot.fusionner_resultats("vrac_csgo_2026-W01", [m1]), 1)
+        self.assertEqual(depot.fusionner_resultats("vrac_csgo_2026-W01", [m1, m2]), 1)  # seul m2 est nouveau
+        self.assertEqual(depot.fusionner_resultats("vrac_csgo_2026-W01", [m1, m2]), 0)
+        self.assertEqual(depot.fusionner_resultats("vrac_csgo_2026-W01", []), 0)
+        self.assertEqual(sorted(m["id"] for m in depot.lister_resultats()), [1, 2])
+
+    def test_recolter_ne_leve_jamais(self):
+        for bizarre in (None, 42, "texte", [], {}, {"events": [None, 1, {"homeTeam": 1}]}, [[[]]]):
+            self.assertEqual(lancer(service.recolter(bizarre)), 0)
+
+    def test_les_pronostics_profitent_directement_de_la_recolte(self):
+        """Boucle complète : des réponses d'API ordinaires → classement → pronostic d'un match à venir."""
+        t0 = time.time()
+        passes = [self.termine(100 + i, 10, 11 if i % 2 else 12, ts=t0 - (i + 1) * 3600) for i in range(6)]
+        lancer(service.recolter({"events": passes}))
+        classement = lancer(service._classement())
+        p = elo.pronostiquer(classement, 10, 11, 3, t0)["pronostic"]
+        self.assertTrue(p["donnees_suffisantes"])
+        self.assertEqual(p["favori"], 1)
 
 
 class QuotaEtDiagnostic(Isole):
@@ -878,6 +1004,22 @@ class BilanSansAppelApi(Isole):
         self.assertAlmostEqual(b["brier"], 0.53, places=3)  # (0.8-1)²+(0.2)² = 0.08 ; (0.7)²+(0.3-1)² = 0.98
         self.assertFalse(b["fiable"])
         self.assertIn("trop petit", b["note"])
+
+    def test_bilan_exclut_les_matchs_equilibres_et_distingue_les_donnees_suffisantes(self):
+        self.interdire_api()
+        passe = time.time() - 5 * 3600
+        self.frige(1, 0.8, 0.2, passe)            # favori 1, résultat 1 -> juste
+        self.frige(2, 0.5, 0.5, passe + 1)        # équilibré : ni juste ni faux
+        self.frige(3, 0.7, 0.3, passe + 2)        # favori 1, résultat 2 -> faux, mais données insuffisantes
+        depot.maj_pronostic(3, {"donnees_suffisantes": False})
+        depot.sauver_resultats_jour("csgo_2026-01-01", {"jeu": "csgo", "jour": "csgo_2026-01-01", "matchs": [
+            m_compact(1, 10, 11, 2, 0, int(passe)), m_compact(2, 10, 11, 2, 0, int(passe)), m_compact(3, 10, 11, 0, 2, int(passe))]})
+        b = lancer(service.bilan())
+        self.assertEqual((b["verifies"], b["equilibres"]), (3, 1))
+        self.assertEqual(b["precision"], 0.5)                       # 1 juste sur 2 matchs avec favori
+        self.assertEqual(b["precision_donnees_suffisantes"], 1.0)   # le seul pronostic solide était juste
+        self.assertEqual(b["verifies_donnees_suffisantes"], 1)
+        self.assertFalse(b["fiable"])
 
     def test_pas_de_verification_avant_le_delai_ni_sans_resultat(self):
         self.interdire_api()

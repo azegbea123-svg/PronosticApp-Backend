@@ -28,7 +28,7 @@ Clé : variable d'environnement RAPIDAPI_KEY (la même que pour football).
 import asyncio
 import json
 import time
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Tuple
 
 import httpx
 
@@ -42,6 +42,9 @@ RESERVE_UTILISATEUR = 2
 TTL_VIDE_MAX = 3 * 3600  # une réponse 204 est retenue au plus 3 h
 
 _quota: Dict[str, Any] = {"limite": None, "restant": None, "fenetre_fin": None}
+# Crochet appelé avec CHAQUE réponse de l'API (neuve, ou relue du cache persistant) : le service y branche la
+# mémorisation des matchs terminés qui nourrit les pronostics. Une erreur du crochet ne casse jamais un appel.
+RECOLTEUR: Optional[Callable[[Any], Awaitable[Any]]] = None
 _pause_jusqua = 0.0          # refroidissement après un 429 "trop de requêtes d'un coup" (pas un quota épuisé)
 PAUSE_429_S = 60
 _derniere_erreur: Dict[str, Any] = {}
@@ -192,6 +195,15 @@ def _memoriser(chemin: str, expire: float, donnees: Dict[str, Any]) -> None:
     _cache[chemin] = (expire, donnees)
 
 
+async def _recolter(donnees: Any) -> None:
+    if RECOLTEUR is None:
+        return
+    try:
+        await RECOLTEUR(donnees)
+    except Exception:
+        pass
+
+
 async def precharger(chemins: Iterable[str]) -> None:
     """Remonte en mémoire les entrées du cache persistant encore valides (aucun appel API).
     À appeler AVANT de planifier un budget d'appels : `en_cache` ne voit que la mémoire."""
@@ -203,6 +215,7 @@ async def precharger(chemins: Iterable[str]) -> None:
     for chemin, hit in zip(manquants_, trouves):
         if hit and hit[0] > maintenant:
             _memoriser(chemin, hit[0], hit[1])
+            await _recolter(hit[1])  # relu du cache persistant : son contenu nourrit aussi les pronostics
 
 
 async def appeler(chemin: str, ttl: int, *, utilisateur: bool = True, persister: bool = True) -> Optional[Dict[str, Any]]:
@@ -216,6 +229,7 @@ async def appeler(chemin: str, ttl: int, *, utilisateur: bool = True, persister:
         persiste = await _lire_persistant(chemin)
         if persiste and persiste[0] > maintenant:
             _memoriser(chemin, persiste[0], persiste[1])
+            await _recolter(persiste[1])
             return persiste[1]
     donnees = await _get(chemin, utilisateur=utilisateur)
     if donnees is None:
@@ -224,6 +238,7 @@ async def appeler(chemin: str, ttl: int, *, utilisateur: bool = True, persister:
     _memoriser(chemin, expire, donnees)
     if persister:
         await _ecrire_persistant(chemin, expire, donnees)
+    await _recolter(donnees)  # CHAQUE appel réel alimente le cache de résultats
     return donnees
 
 

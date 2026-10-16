@@ -20,7 +20,7 @@ journée UTC de J.
 import asyncio
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterator, List, Optional, Set
 from urllib.parse import quote
 
 from . import client, depot, elo, modele, parsing
@@ -64,6 +64,8 @@ MIN_BILAN_FIABLE = 30
 
 _ORDRE_STATUT = {"en_direct": 0, "prevu": 1, "inconnu": 2, "reporte": 3, "termine": 4, "annule": 5}
 _live_depenses: Dict[str, Any] = {"jour": None, "n": 0}
+_recoltes: Set[int] = set()          # identifiants de matchs terminés déjà traités (évite de réécrire en base)
+_verrou_etat: Dict[str, Any] = {"boucle": None, "verrou": None}
 _memoire: Dict[str, Any] = {"resultats": (0.0, []), "classement": None, "pronostics": (0.0, {}), "jours": (0.0, set()),
                             "pause_rattrapage": 0.0}
 PAUSE_RATTRAPAGE_S = 600  # après un échec du rattrapage, on ne réessaie pas avant 10 min (pas d'acharnement sur le quota)
@@ -79,6 +81,8 @@ class ErreurEsport(Exception):
 def reinitialiser_memoire() -> None:
     """Vide les caches du module et les compteurs (tests)."""
     _live_depenses.update(jour=None, n=0)
+    _recoltes.clear()
+    _verrou_etat.update(boucle=None, verrou=None)
     _memoire.update(resultats=(0.0, []), classement=None, pronostics=(0.0, {}), jours=(0.0, set()), pause_rattrapage=0.0)
 
 
@@ -171,12 +175,68 @@ def _compact(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "bo": ev["best_of"], "v": ev["vainqueur"]}
 
 
-async def _enregistrer_resultats(slug: str, jour: datetime, evenements: List[Dict[str, Any]]) -> None:
-    """Mémorise les matchs terminés d'un jour (même une liste vide : le jour est alors marqué « traité »)."""
-    finis = [c for c in (_compact(e) for e in evenements if e["jeu"] == slug) if c is not None]
+def _verrou() -> asyncio.Lock:
+    """Un verrou par boucle d'événements (un verrou lié à une ancienne boucle lèverait une erreur)."""
+    boucle = asyncio.get_running_loop()
+    if _verrou_etat["boucle"] is not boucle:
+        _verrou_etat.update(boucle=boucle, verrou=asyncio.Lock())
+    return _verrou_etat["verrou"]
+
+
+def _trouver_evenements(o: Any) -> Iterator[Dict[str, Any]]:
+    """Tous les objets « match » d'une réponse quelconque de l'API (liste du jour, direct, détail, historique...)."""
+    pile = [o]
+    while pile:
+        x = pile.pop()
+        if isinstance(x, dict):
+            if "homeTeam" in x and "awayTeam" in x and "startTimestamp" in x:
+                yield x
+            pile.extend(x.values())
+        elif isinstance(x, list):
+            pile.extend(x)
+
+
+def _id_vrac(c: Dict[str, Any]) -> str:
+    """Les matchs récoltés sont groupés par jeu et semaine ISO : peu de documents, jamais trop gros."""
+    jour = datetime.fromtimestamp(c["ts"], tz=timezone.utc).isocalendar()
+    return f"vrac_{c['jeu']}_{jour[0]}-W{jour[1]:02d}"
+
+
+async def recolter(donnees: Any) -> int:
+    """
+    Mémorise TOUS les matchs terminés contenus dans une réponse de l'API, quelle que soit la requête : c'est le
+    cache de résultats qui nourrit le classement et donc les pronostics. Branché sur chaque appel par client.RECOLTEUR.
+    Renvoie le nombre de matchs nouvellement mémorisés ; ne lève jamais d'exception.
+    """
+    try:
+        par_doc: Dict[str, List[Dict[str, Any]]] = {}
+        for brut in _trouver_evenements(donnees):
+            ev = parsing.normaliser_evenement(brut)
+            c = _compact(ev) if ev is not None else None
+            if c is None or c["id"] in _recoltes or not c["jeu"]:
+                continue
+            par_doc.setdefault(_id_vrac(c), []).append(c)
+        if not par_doc:
+            return 0
+        ajoutes = 0
+        async with _verrou():  # écritures sérialisées : pas de mise à jour perdue entre deux réponses simultanées
+            for doc_id, liste in par_doc.items():
+                ajoutes += await asyncio.to_thread(depot.fusionner_resultats, doc_id, liste)
+            if len(_recoltes) > 50_000:
+                _recoltes.clear()
+            _recoltes.update(c["id"] for liste in par_doc.values() for c in liste)
+        if ajoutes:
+            _memoire.update(resultats=(0.0, []), classement=None)
+        return ajoutes
+    except Exception:
+        return 0
+
+
+async def _marquer_jour(slug: str, jour: datetime) -> None:
+    """Marque un jour passé comme « traité » (même vide) pour ne pas le redemander. Les matchs, eux, arrivent par recolter()."""
     await asyncio.to_thread(depot.sauver_resultats_jour, _id_jour(slug, jour),
-                            {"jeu": slug, "jour": _id_jour(slug, jour), "maj": int(time.time()), "matchs": finis})
-    _memoire.update(resultats=(0.0, []), classement=None, jours=(0.0, set()))
+                            {"jeu": slug, "jour": _id_jour(slug, jour), "maj": int(time.time()), "matchs": []})
+    _memoire.update(jours=(0.0, set()))
 
 
 async def _resultats() -> List[Dict[str, Any]]:
@@ -205,40 +265,37 @@ async def _pronostics_geles() -> Dict[int, Dict[str, Any]]:
 
 
 def _vue_pronostic(doc: Dict[str, Any], ev: Dict[str, Any], gele: bool) -> Dict[str, Any]:
-    probas = {1: doc["probabiliteVictoireEquipe1"], 3: doc["probabiliteMatchNul"], 2: doc["probabiliteVictoireEquipe2"]}
-    favori = max(probas, key=probas.get)
+    p1, pn, p2 = doc["probabiliteVictoireEquipe1"], doc["probabiliteMatchNul"], doc["probabiliteVictoireEquipe2"]
+    favori = elo.favori(p1, pn, p2)
     return {
-        "p1": doc["probabiliteVictoireEquipe1"], "pnul": doc["probabiliteMatchNul"], "p2": doc["probabiliteVictoireEquipe2"],
-        "favori": favori, "confiance": doc["confiance"], "details": doc.get("details"), "gele": gele,
-        "limites": modele.LIMITES,
-        # Match terminé : le pronostic figé avant le match est confronté au résultat réel.
-        "correct": (favori == ev["vainqueur"]) if ev["statut"] == "termine" and ev["vainqueur"] in (1, 2, 3) else None,
+        "p1": p1, "pnul": pn, "p2": p2, "favori": favori, "confiance": doc["confiance"],
+        "donnees_suffisantes": doc.get("donnees_suffisantes", True),
+        "details": doc.get("details"), "gele": gele, "limites": modele.LIMITES,
+        # Match terminé : le pronostic figé avant le match est confronté au résultat réel (match équilibré : non évalué).
+        "correct": ((favori == ev["vainqueur"]) if favori != 0 else None)
+        if ev["statut"] == "termine" and ev["vainqueur"] in (1, 2, 3) else None,
     }
 
 
 async def _ajouter_pronostics(liste: List[Dict[str, Any]], maintenant: float) -> None:
-    """Ajoute `pronostic` (ou `pronostic_raison`) à chaque match de la liste. Zéro appel API."""
+    """Ajoute `pronostic` à chaque match à venir ou en cours de la liste. Zéro appel API ; toujours un pronostic."""
     classement = await _classement()
     geles = await _pronostics_geles()
     nouveaux: List[Dict[str, Any]] = []
     for ev in liste:
-        ev["pronostic"], ev["pronostic_raison"] = None, None
+        ev["pronostic"] = None
         doc = geles.get(ev["id"])
         if doc:
             ev["pronostic"] = _vue_pronostic(doc, ev, gele=True)
             continue
         if ev["statut"] not in ("prevu", "inconnu", "en_direct"):
             continue
-        calcul = elo.pronostiquer(classement, ev["equipe1"]["id"], ev["equipe2"]["id"], ev["best_of"], maintenant)
-        if "raison" in calcul:
-            ev["pronostic_raison"] = calcul["raison"]
-            continue
-        p = calcul["pronostic"]
+        p = elo.pronostiquer(classement, ev["equipe1"]["id"], ev["equipe2"]["id"], ev["best_of"], maintenant)["pronostic"]
         doc = {"eventId": ev["id"], "jeu": ev["jeu"], "jeu_nom": ev["jeu_nom"], "equipe1": ev["equipe1"]["nom"],
                "equipe2": ev["equipe2"]["nom"], "best_of": ev["best_of"], "debut": ev["debut"], "debut_ts": ev["ts"],
                "calcule_le": int(maintenant), "statut": "en_attente", "probabiliteVictoireEquipe1": p["p1"],
                "probabiliteMatchNul": p["pnul"], "probabiliteVictoireEquipe2": p["p2"], "confiance": p["confiance"],
-               "details": p["details"]}
+               "donnees_suffisantes": p["donnees_suffisantes"], "details": p["details"]}
         # On ne FIGE que les matchs qui n'ont pas commencé : un pronostic calculé en cours de match n'est pas honnête.
         if ev["statut"] == "prevu" and ev["ts"] > maintenant:
             nouveaux.append(doc)
@@ -295,8 +352,7 @@ async def _rattraper_passe(maintenant_dt: datetime) -> int:
         if rep is None:
             _memoire["pause_rattrapage"] = time.time() + PAUSE_RATTRAPAGE_S
             break
-        evs = [e for e in (parsing.normaliser_evenement(b) for b in rep.get("events") or []) if e is not None]
-        await _enregistrer_resultats(slug, jour, evs)
+        await _marquer_jour(slug, jour)  # les matchs terminés de la réponse sont déjà récoltés par le client
         fait += 1
     return fait
 
@@ -309,7 +365,7 @@ async def _progression_historique(maintenant_dt: datetime) -> Dict[str, Any]:
     recents = sum(1 for k in range(1, JOURS_AMORCAGE + 1) for slug in JEUX
                   if _id_jour(slug, maintenant_dt - timedelta(days=k)) in deja)
     return {"jours_couverts": couverts // len(JEUX), "jours_cibles": JOURS_HISTORIQUE,
-            "matchs_memorises": len(_memoire["resultats"][1]),
+            "matchs_memorises": len(await _resultats()),
             "amorcage_termine": recents >= JOURS_AMORCAGE * len(JEUX)}
 
 
@@ -398,9 +454,6 @@ async def lister_matchs(jeu: Optional[str] = None) -> Dict[str, Any]:
         for ev in evs:
             if ev["jeu"] == d["jeu"]:
                 matchs[ev["id"]] = ev
-        # Les matchs terminés d'AUJOURD'HUI nourrissent le classement (seulement si la liste est neuve).
-        if d["quand"] == "aujourd'hui" and d["chemin"] not in en_cache_avant:
-            await _enregistrer_resultats(d["jeu"], maintenant_dt, evs)
 
     live = reponses.get(CHEMIN_LIVE)
     ids_en_direct = set()
@@ -501,8 +554,8 @@ async def detail(event_id: int, avec: Set[str]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 
 def _classe_predite(p: Dict[str, Any]) -> int:
-    probas = {1: p["probabiliteVictoireEquipe1"], 3: p["probabiliteMatchNul"], 2: p["probabiliteVictoireEquipe2"]}
-    return max(probas, key=probas.get)
+    """1, 2, 3 (nul) ou 0 (match équilibré : aucun favori, donc ni juste ni faux)."""
+    return elo.favori(p["probabiliteVictoireEquipe1"], p["probabiliteMatchNul"], p["probabiliteVictoireEquipe2"])
 
 
 def _brier(p: Dict[str, Any], reel: int) -> float:
@@ -533,16 +586,23 @@ async def bilan() -> Dict[str, Any]:
 
     verifies = [p for p in pronos if p.get("statut") == "verifie"]
     n = len(verifies)
-    bons = sum(1 for p in verifies if _classe_predite(p) == p["resultat"])
+    avec_favori = [p for p in verifies if _classe_predite(p) != 0]
+    bons = sum(1 for p in avec_favori if _classe_predite(p) == p["resultat"])
+    solides = [p for p in avec_favori if p.get("donnees_suffisantes", True)]
+    bons_solides = sum(1 for p in solides if _classe_predite(p) == p["resultat"])
     brier = sum(_brier(p, p["resultat"]) for p in verifies) / n if n else None
     return {
         "verifies": n,
         "en_attente": sum(1 for p in pronos if p.get("statut") == "en_attente"),
-        "precision": round(bons / n, 3) if n else None,
+        "equilibres": n - len(avec_favori),   # matchs sans favori : exclus du taux de réussite
+        "precision": round(bons / len(avec_favori), 3) if avec_favori else None,
+        # Même mesure, uniquement quand chaque équipe avait assez de matchs connus : la plus représentative.
+        "precision_donnees_suffisantes": round(bons_solides / len(solides), 3) if solides else None,
+        "verifies_donnees_suffisantes": len(solides),
         "brier": round(brier, 4) if brier is not None else None,
-        "fiable": n >= MIN_BILAN_FIABLE,
+        "fiable": len(solides) >= MIN_BILAN_FIABLE,
         "note": ("Échantillon trop petit pour conclure (moins de "
-                 f"{MIN_BILAN_FIABLE} pronostics vérifiés)." if n < MIN_BILAN_FIABLE else
+                 f"{MIN_BILAN_FIABLE} pronostics vérifiés avec des données suffisantes)." if len(solides) < MIN_BILAN_FIABLE else
                  "Précision mesurée sur des pronostics figés avant les matchs (sans biais temporel)."),
         "derniers": [
             {"equipe1": p["equipe1"], "equipe2": p["equipe2"], "predit": _classe_predite(p),
@@ -550,3 +610,7 @@ async def bilan() -> Dict[str, Any]:
             for p in sorted(verifies, key=lambda p: p["debut_ts"], reverse=True)[:5]
         ],
     }
+
+
+# Chaque réponse de l'API (neuve ou relue du cache persistant) passe par recolter().
+client.RECOLTEUR = recolter

@@ -8,8 +8,8 @@ Principe : chaque série met à jour les deux équipes avec le score fractionnai
 cartes jouées (2-0 compte plus qu'un 2-1), K = 24, départ 1500. La probabilité de gagner une carte vient
 de l'écart de classement ; modele.proba_serie la convertit en probabilité de série (BO1, BO2, BO3, BO5).
 
-Pas de pronostic sous MIN_MATCHS matchs connus pour l'une des équipes : afficher 50 % serait mentir. Avec peu de
-matchs, le pronostic existe mais porte la mention « confiance faible » (modele.confiance exige 8 matchs pour mieux).
+Un pronostic est TOUJOURS fourni ; avec peu de matchs connus il porte la mention « confiance faible » (modele.confiance
+exige 8 matchs pour mieux) et `donnees_suffisantes` vaut faux, ce que le bilan prend en compte.
 """
 
 from typing import Any, Dict, List, Optional
@@ -41,24 +41,36 @@ def calculer(matchs: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"notes": notes, "nombre": nombre, "dernier": dernier}
 
 
+def favori(p1: float, pnul: float, p2: float) -> int:
+    """1 ou 2 : équipe favorite ; 3 : nul le plus probable ; 0 : match ÉQUILIBRÉ (écart < 3 points)."""
+    probas = {1: p1, 3: pnul, 2: p2}
+    meilleur = max(probas, key=probas.get)
+    if meilleur in (1, 2) and abs(p1 - p2) < 0.03:
+        return 0
+    return meilleur
+
+
 def pronostiquer(classement: Dict[str, Any], id1: int, id2: int, best_of: Optional[int],
                  maintenant_ts: float) -> Dict[str, Any]:
-    """{"pronostic": {...}} ou {"raison": "..."} si les données ne suffisent pas."""
+    """
+    Pronostic TOUJOURS fourni. Une équipe sans historique part du classement neutre (1500) : si l'autre est connue,
+    l'écart reste informatif ; si aucune ne l'est, le match sort « équilibré ». `donnees_suffisantes` dit
+    honnêtement si chaque équipe a au moins MIN_MATCHS matchs connus (le bilan les distingue des autres).
+    """
     nombre = classement["nombre"]
     n1, n2 = nombre.get(id1, 0), nombre.get(id2, 0)
-    if n1 < MIN_MATCHS or n2 < MIN_MATCHS:
-        return {"raison": f"Historique insuffisant ({n1} et {n2} matchs connus, {MIN_MATCHS} minimum)."}
-    r1, r2 = classement["notes"][id1], classement["notes"][id2]
+    r1, r2 = classement["notes"].get(id1, BASE), classement["notes"].get(id2, BASE)
     p_carte = 1.0 / (1.0 + 10 ** ((r2 - r1) / 400.0))
     serie = modele.proba_serie(p_carte, best_of)
-    plus_ancien = min(classement["dernier"][id1], classement["dernier"][id2])
-    probas = {1: serie["p1"], 3: serie["nul"], 2: serie["p2"]}
+    connus = [classement["dernier"][i] for i in (id1, id2) if i in classement["dernier"]]
+    plus_ancien = min(connus) if connus else None
+    p1, pnul, p2 = round(serie["p1"], 4), round(serie["nul"], 4), round(serie["p2"], 4)
     return {"pronostic": {
-        "p1": round(serie["p1"], 4),
-        "pnul": round(serie["nul"], 4),
-        "p2": round(serie["p2"], 4),
-        "favori": max(probas, key=probas.get),
+        "p1": p1, "pnul": pnul, "p2": p2,
+        "favori": favori(p1, pnul, p2),
+        # Une équipe inconnue force « faible » : modele.confiance exige 8 matchs connus de chacune.
         "confiance": modele.confiance(n1, n2, plus_ancien, maintenant_ts),
+        "donnees_suffisantes": n1 >= MIN_MATCHS and n2 >= MIN_MATCHS,
         "details": {"elo1": round(r1), "elo2": round(r2), "matchs1": n1, "matchs2": n2,
-                    "jours_depuis_dernier_match": int((maintenant_ts - plus_ancien) // 86400)},
+                    "jours_depuis_dernier_match": None if plus_ancien is None else int((maintenant_ts - plus_ancien) // 86400)},
     }}

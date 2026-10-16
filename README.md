@@ -260,11 +260,13 @@ Jeux couverts (3) : Counter Strike (1572), Dota 2 (1570), LoL (1571).
   AMORÇAGE (5 derniers jours × 3 jeux ≈ 15 requêtes, une seule fois) à 4 jours par actualisation tant qu'il reste plus de
   15 requêtes ; puis ENTRETIEN (jusqu'à 45 jours) avec l'excédent seulement (≥ 30 restantes). Pause de 10 min après un échec.
 
-**Pronostics sans appel API.** Chaque liste du jour contient aussi les matchs terminés : on les mémorise
-(`esport_resultats`), on rattrape peu à peu 45 jours d'historique avec le quota excédentaire, et un classement Elo
+**Pronostics sans appel API.** CHAQUE réponse de l'API (liste, direct, détail, historique d'équipe, cache persistant relu)
+est passée à `service.recolter` via `client.RECOLTEUR` : tous les matchs terminés qu'elle contient sont mémorisés
+(`esport_resultats`, documents `vrac_{jeu}_{année}-W{semaine}`, sans doublon). On rattrape en plus peu à peu 45 jours d'historique avec le quota excédentaire, et un classement Elo
 (avec ajustement à la force des adversaires) en tire le pronostic de CHAQUE match, affiché directement dans la liste
-(dès 2 matchs connus par équipe, avec la mention « confiance faible » tant que l'échantillon est petit).
-Le pronostic est figé avant le coup d'envoi ; `GET /esport/bilan` le confronte au résultat, sans aucun appel API.
+(toujours fourni : une équipe sans historique part du classement neutre, avec la mention « confiance faible »).
+Le pronostic est figé avant le coup d'envoi ; `GET /esport/bilan` le confronte au résultat, sans aucun appel API ; il exclut les matchs « équilibrés » (aucun favori) et
+donne séparément la précision des pronostics à données suffisantes (`precision_donnees_suffisantes`).
 
 - `GET /esport/jeux`, `GET /esport/matchs?jeu=csgo` (matchs + `pronostic` + `diagnostic` + `historique`)
 - `GET /esport/match/{id}?avec=cartes,duel,votes` (détail, 1 à 4 appels API : à la demande seulement)

@@ -34,8 +34,9 @@ async def matchs(jeu: Optional[str] = None, uid: str = Depends(auth.utilisateur_
     """
     Tous les matchs e-sport : en direct, à venir (aujourd'hui, demain) et terminés (24 dernières
     heures), pour un jeu (`jeu` = csgo | dota2 | lol) ou tous. Chaque match porte son `pronostic`
-    (probabilités, favori, confiance), calculé sans appel API et figé avant le coup d'envoi, ou
-    `pronostic_raison` si l'historique est insuffisant. `favori` = une des équipes est suivie.
+    (probabilités, favori, confiance), calculé sans appel API et figé avant le coup d'envoi ; il est
+    toujours fourni (confiance « faible » et `donnees_suffisantes` faux si peu de matchs connus).
+    `favori` (champ du match) = une des équipes est suivie.
     Coût API : au plus 7 appels, presque toujours 0 (cache persistant : 10 min pour le direct, 3 h
     aujourd'hui, 8 h demain ; direct plafonné à 10 appels réels par jour). `diagnostic` détaille chaque
     requête (ok, cache, vide, échec, ignoré) et `historique` la progression du classement.

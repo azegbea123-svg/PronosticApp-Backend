@@ -10,6 +10,7 @@ pas touché.
 """
 
 import hashlib
+import time
 import json
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -153,6 +154,37 @@ def sauver_resultats_jour(doc_id: str, contenu: Dict[str, Any]) -> None:
         col.document(doc_id).set({**contenu, "matchs": json.dumps(contenu["matchs"], ensure_ascii=False)})
     except Exception:
         pass
+
+
+def fusionner_resultats(doc_id: str, nouveaux: List[Dict[str, Any]]) -> int:
+    """Ajoute `nouveaux` matchs terminés au document `doc_id` (fusion par identifiant de match).
+    Renvoie le nombre de matchs réellement AJOUTÉS ; n'écrit rien s'il n'y en a aucun."""
+    if not nouveaux:
+        return 0
+    jeu = nouveaux[0].get("jeu")
+    col = _col(COLLECTION_RESULTATS)
+    if col is None:
+        doc = _mem_resultats.setdefault(doc_id, {"jeu": jeu, "jour": doc_id, "matchs": []})
+        existants = {m["id"]: m for m in doc["matchs"]}
+        ajoutes = sum(1 for m in nouveaux if m["id"] not in existants)
+        existants.update({m["id"]: m for m in nouveaux})
+        doc["matchs"] = list(existants.values())
+        return ajoutes
+    try:
+        ref = col.document(doc_id)
+        snap = ref.get()
+        existants = {m["id"]: m for m in json.loads(snap.to_dict()["matchs"])} if snap.exists else {}
+        ajoutes = sum(1 for m in nouveaux if m["id"] not in existants)
+        if not ajoutes:
+            return 0
+        existants.update({m["id"]: m for m in nouveaux})
+        texte = json.dumps(list(existants.values()), ensure_ascii=False)
+        if len(texte) > 900_000:
+            return 0  # document trop gros (limite Firestore 1 Mo) : on n'écrit pas plutôt que d'échouer
+        ref.set({"jeu": jeu, "jour": doc_id, "maj": int(time.time()), "matchs": texte})
+        return ajoutes
+    except Exception:
+        return 0
 
 
 def lister_resultats() -> List[Dict[str, Any]]:
