@@ -8,7 +8,8 @@ Principe : chaque série met à jour les deux équipes avec le score fractionnai
 cartes jouées (2-0 compte plus qu'un 2-1), K = 24, départ 1500. La probabilité de gagner une carte vient
 de l'écart de classement ; modele.proba_serie la convertit en probabilité de série (BO1, BO2, BO3, BO5).
 
-Pas de pronostic sous MIN_MATCHS matchs connus pour l'une des équipes : afficher 50 % serait mentir.
+Pas de pronostic sous MIN_MATCHS matchs connus pour l'une des équipes : afficher 50 % serait mentir. Avec peu de
+matchs, le pronostic existe mais porte la mention « confiance faible » (modele.confiance exige 8 matchs pour mieux).
 """
 
 from typing import Any, Dict, List, Optional
@@ -17,7 +18,7 @@ from . import modele
 
 BASE = 1500.0
 K = 24.0
-MIN_MATCHS = 3
+MIN_MATCHS = 2
 
 
 def calculer(matchs: List[Dict[str, Any]]) -> Dict[str, Any]:

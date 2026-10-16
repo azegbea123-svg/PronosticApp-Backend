@@ -261,6 +261,10 @@ def faux_reseau(table, appeles=None):
 class ServiceListes(Isole):
     def setUp(self):
         super().setUp()
+        async def _sans_rattrapage(_maintenant):
+            return 0
+
+        self.remplacer(service, "_rattraper_passe", _sans_rattrapage)
         self.maintenant = datetime.now(timezone.utc)
         self.aujourdhui = service._chemin_jour(1572, self.maintenant)
         self.demain = service._chemin_jour(1572, self.maintenant + timedelta(days=1))
@@ -511,6 +515,10 @@ NOW_ = 1_800_000_000
 class PronosticsDansLaListe(Isole):
     def setUp(self):
         super().setUp()
+        async def _sans_rattrapage(_maintenant):
+            return 0
+
+        self.remplacer(service, "_rattraper_passe", _sans_rattrapage)
         self.maintenant = datetime.now(timezone.utc)
         self.aujourdhui = service._chemin_jour(1572, self.maintenant)
         self.demain = service._chemin_jour(1572, self.maintenant + timedelta(days=1))
@@ -632,25 +640,51 @@ class Rattrapage(Isole):
 
         self.remplacer(service.client, "appeler", f)
 
-    def test_ne_rattrape_que_le_quota_excedentaire(self):
-        for restant, attendu in ((None, 0), (29, 0), (30, 0), (31, 1), (45, 2)):
-            self.appels.clear()
-            service.reinitialiser_memoire()
+    def amorcage_fait(self):
+        for k in range(1, service.JOURS_AMORCAGE + 1):
+            for slug in service.JEUX:
+                depot._mem_resultats[service._id_jour(slug, self.maintenant - timedelta(days=k))] = {"matchs": []}
+        service._memoire["jours"] = (0.0, set())
+
+    def essayer(self, restant):
+        self.appels.clear()
+        client._quota.update(restant=restant, fenetre_fin=None if restant is None else time.time() + 100)
+        service._memoire.update(jours=(0.0, set()), pause_rattrapage=0.0)
+        return lancer(service._rattraper_passe(self.maintenant))
+
+    def test_amorcage_4_jours_par_passage_des_que_le_quota_depasse_la_reserve(self):
+        for restant, attendu in ((None, 4), (14, 0), (15, 0), (16, 1), (18, 3), (45, 4)):
             depot._mem_resultats.clear()
-            client._quota.update(restant=restant, fenetre_fin=time.time() + 100)
-            self.assertEqual(lancer(service._rattraper_passe(self.maintenant)), attendu, f"restant={restant}")
+            self.assertEqual(self.essayer(restant), attendu, f"restant={restant}")
             self.assertEqual(len(self.appels), attendu)
 
-    def test_progresse_jour_apres_jour_sans_refaire_ce_qui_est_fait(self):
+    def test_amorcage_commence_par_les_jours_les_plus_recents_de_chaque_jeu(self):
+        self.essayer(45)
+        chemins = [a[0] for a in self.appels]
+        hier = self.maintenant - timedelta(days=1)
+        for slug in ("csgo", "dota2", "lol"):
+            self.assertIn(service._chemin_jour(service.JEUX[slug]["id"], hier), chemins)
+        self.assertIn(service._chemin_jour(1572, self.maintenant - timedelta(days=2)), chemins)
+
+    def test_l_amorcage_se_termine_puis_l_entretien_ne_prend_que_l_excedent(self):
+        depot._mem_resultats.clear()
+        client._quota.update(restant=45, fenetre_fin=time.time() + 100)
+        for _ in range(4):
+            lancer(service._rattraper_passe(self.maintenant))
+        self.assertTrue(lancer(service._progression_historique(self.maintenant))["amorcage_termine"])
+        for restant, attendu in ((None, 0), (29, 0), (30, 0), (31, 1), (45, 2)):
+            self.appels.clear()
+            self.assertEqual(self.essayer(restant), attendu, f"entretien restant={restant}")
+
+    def test_entretien_progresse_sans_refaire_ce_qui_est_fait(self):
+        self.amorcage_fait()
         client._quota.update(restant=45, fenetre_fin=time.time() + 100)
         lancer(service._rattraper_passe(self.maintenant))
         lancer(service._rattraper_passe(self.maintenant))
         chemins = [a[0] for a in self.appels]
         self.assertEqual(len(chemins), 4)
         self.assertEqual(len(set(chemins)), 4)  # jamais deux fois le même jour
-        self.assertEqual(len(depot._mem_resultats), 4)
-        hier = service._chemin_jour(1572, self.maintenant - timedelta(days=1))
-        self.assertIn(hier, chemins)  # on commence par les jours les plus récents
+        self.assertIn(service._chemin_jour(1572, self.maintenant - timedelta(days=service.JOURS_AMORCAGE + 1)), chemins)
         self.assertTrue(all(a[2] is False for a in self.appels))  # pas de doublon de stockage en cache
 
     def test_s_arrete_au_premier_echec(self):
@@ -673,9 +707,8 @@ class Rattrapage(Isole):
             return None
 
         self.remplacer(service.client, "appeler", echec)
-        lancer(service._rattraper_passe(self.maintenant))
-        lancer(service._rattraper_passe(self.maintenant))
-        lancer(service._rattraper_passe(self.maintenant))
+        for _ in range(3):
+            lancer(service._rattraper_passe(self.maintenant))
         self.assertEqual(len(self.appels), 1)                   # une seule tentative, puis pause
         service._memoire["pause_rattrapage"] = time.time() - 1   # la pause est écoulée
         lancer(service._rattraper_passe(self.maintenant))
@@ -688,12 +721,70 @@ class Rattrapage(Isole):
         client._quota.update(restant=50, fenetre_fin=time.time() + 100)
         self.assertEqual(lancer(service._rattraper_passe(self.maintenant)), 0)
         self.assertEqual(self.appels, [])
-        self.assertEqual(service._progression_historique(self.maintenant)["jours_couverts"], service.JOURS_HISTORIQUE)
+        self.assertEqual(lancer(service._progression_historique(self.maintenant))["jours_couverts"], service.JOURS_HISTORIQUE)
+
+
+class DemarrageAFroid(Isole):
+    """Le cas qui comptait : base VIDE au premier lancement. Les pronostics doivent apparaître tout de suite."""
+
+    def test_des_le_premier_affichage_les_pronostics_apparaissent(self):
+        maintenant = datetime.now(timezone.utc)
+        t0 = int(time.time())
+        identifiant = [100]
+
+        def jour_passe(k):
+            """Matchs terminés d'un jour passé : 10 domine 11, qui domine 12 (assez pour le classement)."""
+            evs = []
+            for e1, e2 in ((10, 11), (11, 12), (10, 12)):
+                identifiant[0] += 1
+                ev = ev_liste(identifiant[0], "csgo", t0 - k * 86400, "finished", e1=e1, e2=e2)
+                ev["winnerCode"], ev["homeScore"]["current"], ev["awayScore"]["current"] = 1, 2, 0
+                evs.append(ev)
+            return {"events": evs}
+
+        a_venir = ev_liste(1, "csgo", time.time() + 3600, "notstarted", e1=10, e2=12)
+
+        async def reseau(chemin, ttl, *, utilisateur=True, persister=True):
+            if chemin == service.CHEMIN_LIVE:
+                return {"events": []}
+            for k in range(0, 12):
+                jour = maintenant - timedelta(days=k)
+                if chemin == service._chemin_jour(1572, jour):
+                    return {"events": [a_venir]} if k == 0 else jour_passe(k)
+                if chemin in (service._chemin_jour(1570, jour), service._chemin_jour(1571, jour)):
+                    return {"events": []}
+            return {"events": []}
+
+        self.remplacer(service.client, "appeler", reseau)
+        self.assertEqual(depot._mem_resultats, {})                        # base vide : aucun historique
+        premier = lancer(service.lister_matchs())
+        m = next(x for x in premier["matchs"] if x["id"] == 1)
+        self.assertIsNotNone(m["pronostic"], m["pronostic_raison"])       # le pronostic est LÀ au premier affichage
+        self.assertEqual(m["pronostic"]["favori"], 1)
+        self.assertEqual(m["pronostic"]["confiance"], "faible")           # honnête : peu de matchs
+        self.assertGreater(premier["historique"]["matchs_memorises"], 0)
+        self.assertFalse(premier["historique"]["amorcage_termine"])
+        client._quota.update(restant=45, fenetre_fin=time.time() + 100)
+
+    def test_sans_aucune_donnee_la_raison_est_expliquee(self):
+        a_venir = ev_liste(1, "csgo", time.time() + 3600, "notstarted", e1=10, e2=12)
+
+        async def reseau(chemin, ttl, *, utilisateur=True, persister=True):
+            return {"events": [a_venir]} if chemin == service._chemin_jour(1572, datetime.now(timezone.utc)) else None
+
+        self.remplacer(service.client, "appeler", reseau)
+        m = next(x for x in lancer(service.lister_matchs())["matchs"] if x["id"] == 1)
+        self.assertIsNone(m["pronostic"])
+        self.assertIn("insuffisant", m["pronostic_raison"])
 
 
 class QuotaEtDiagnostic(Isole):
     def setUp(self):
         super().setUp()
+        async def _sans_rattrapage(_maintenant):
+            return 0
+
+        self.remplacer(service, "_rattraper_passe", _sans_rattrapage)
         self.maintenant = datetime.now(timezone.utc)
 
     def tout_vide(self):

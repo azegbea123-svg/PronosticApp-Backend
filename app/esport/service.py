@@ -51,6 +51,11 @@ LOT_REQUETES = 2          # requêtes simultanées au maximum : évite le 429 "t
 JOURS_HISTORIQUE = 45     # profondeur visée pour le classement
 SEUIL_RATTRAPAGE = 30     # on ne rattrape le passé que tant qu'il RESTE au moins ce nombre de requêtes
 RATTRAPAGE_MAX_PAR_PASSAGE = 2
+# AMORÇAGE : tant que les JOURS_AMORCAGE derniers jours ne sont pas tous mémorisés, il n'y a pas assez de matchs pour
+# pronostiquer. On rattrape alors plus vite (4 jours par passage) et avec un seuil plus bas : tant qu'il reste plus
+# que la réserve de fond (15). C'est un coût UNIQUE d'environ 15 requêtes (5 jours × 3 jeux).
+JOURS_AMORCAGE = 5
+AMORCAGE_MAX_PAR_PASSAGE = 4
 TTL_MEMOIRE_RESULTATS = 900
 TTL_MEMOIRE_PRONOSTICS = 300
 DELAI_VERIFICATION_H = 2  # on ne vérifie un pronostic qu'au moins 2 h après le coup d'envoi
@@ -245,23 +250,46 @@ async def _ajouter_pronostics(liste: List[Dict[str, Any]], maintenant: float) ->
         await asyncio.to_thread(depot.sauver_pronostics, nouveaux)
 
 
-async def _rattraper_passe(maintenant_dt: datetime) -> int:
-    """Récupère quelques jours passés avec le quota EXCÉDENTAIRE seulement (tant qu'il en reste ≥ SEUIL_RATTRAPAGE)."""
-    restant = client.quota()["restant"]
-    if time.time() < _memoire["pause_rattrapage"]:
-        return 0
-    if restant is None or restant < SEUIL_RATTRAPAGE or not client.peut_appeler(False):
-        return 0
+async def _jours_memorises() -> Set[str]:
+    """Identifiants (« csgo_2026-10-13 ») des jours déjà mémorisés ; relu si le cache a été invalidé."""
     expire, deja = _memoire["jours"]
     if expire <= time.time():
         deja = await asyncio.to_thread(depot.ids_resultats_jours)
         _memoire["jours"] = (time.time() + TTL_MEMOIRE_RESULTATS, deja)
+    return deja
+
+
+async def _rattraper_passe(maintenant_dt: datetime) -> int:
+    """
+    Récupère des jours passés pour nourrir le classement. Deux régimes :
+      - AMORÇAGE (les 5 derniers jours ne sont pas tous mémorisés) : 4 jours par passage, tant qu'il reste plus
+        que la réserve de fond. Sans cela, aucun pronostic n'apparaît.
+      - ENTRETIEN (jusqu'à 45 jours) : 2 jours par passage, avec le quota EXCÉDENTAIRE seulement (≥ 30 restantes).
+    """
+    if time.time() < _memoire["pause_rattrapage"]:
+        return 0
+    deja = await _jours_memorises()
+    recents = sum(1 for k in range(1, JOURS_AMORCAGE + 1) for slug in JEUX
+                  if _id_jour(slug, maintenant_dt - timedelta(days=k)) in deja)
+    amorcage = recents < JOURS_AMORCAGE * len(JEUX)
+    seuil = client.RESERVE_ARRIERE_PLAN if amorcage else SEUIL_RATTRAPAGE
+    par_passage = AMORCAGE_MAX_PAR_PASSAGE if amorcage else RATTRAPAGE_MAX_PAR_PASSAGE
+
+    restant = client.quota()["restant"]
+    if restant is None:
+        # Compteur inconnu (tout vient du cache) : on tente seulement en amorçage ; un 429 déclencherait la pause.
+        budget = par_passage if amorcage else 0
+    else:
+        budget = min(par_passage, restant - seuil)
+    if budget <= 0 or not client.peut_appeler(False):
+        return 0
+
     a_faire = []
-    for k in range(1, JOURS_HISTORIQUE + 1):
+    for k in range(1, JOURS_HISTORIQUE + 1):  # du plus récent au plus ancien
         jour = maintenant_dt - timedelta(days=k)
         a_faire += [(slug, jour) for slug in JEUX if _id_jour(slug, jour) not in deja]
     fait = 0
-    for slug, jour in a_faire[:min(RATTRAPAGE_MAX_PAR_PASSAGE, restant - SEUIL_RATTRAPAGE)]:
+    for slug, jour in a_faire[:budget]:
         # persister=False : le contenu utile est déjà stocké dans esport_resultats, inutile de le doubler.
         rep = await client.appeler(_chemin_jour(JEUX[slug]["id"], jour), 3600, utilisateur=False, persister=False)
         if rep is None:
@@ -273,13 +301,16 @@ async def _rattraper_passe(maintenant_dt: datetime) -> int:
     return fait
 
 
-def _progression_historique(maintenant_dt: datetime) -> Dict[str, int]:
-    deja = _memoire["jours"][1]
+async def _progression_historique(maintenant_dt: datetime) -> Dict[str, Any]:
+    deja = await _jours_memorises()  # relu si un enregistrement vient d'invalider le cache (sinon : « 0 jour » à tort)
     cibles = JOURS_HISTORIQUE * len(JEUX)
     couverts = sum(1 for k in range(1, JOURS_HISTORIQUE + 1) for slug in JEUX
                    if _id_jour(slug, maintenant_dt - timedelta(days=k)) in deja)
+    recents = sum(1 for k in range(1, JOURS_AMORCAGE + 1) for slug in JEUX
+                  if _id_jour(slug, maintenant_dt - timedelta(days=k)) in deja)
     return {"jours_couverts": couverts // len(JEUX), "jours_cibles": JOURS_HISTORIQUE,
-            "matchs_memorises": len(_memoire["resultats"][1])}
+            "matchs_memorises": len(_memoire["resultats"][1]),
+            "amorcage_termine": recents >= JOURS_AMORCAGE * len(JEUX)}
 
 
 # --------------------------------------------------------------------------
@@ -407,7 +438,7 @@ async def lister_matchs(jeu: Optional[str] = None) -> Dict[str, Any]:
         conseil = "Données incomplètes pour : " + ", ".join(sorted(JEUX[j]["nom"] for j in jeux_en_echec)) + "."
     return {"matchs": liste, "jeux_en_echec": sorted(jeux_en_echec), "direct_disponible": not live_en_echec,
             "quota": client.quota(), "conseil": conseil, "diagnostic": diagnostic,
-            "historique": _progression_historique(maintenant_dt)}
+            "historique": await _progression_historique(maintenant_dt)}
 
 
 # --------------------------------------------------------------------------

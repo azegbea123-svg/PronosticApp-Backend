@@ -256,12 +256,14 @@ Jeux couverts (3) : Counter Strike (1572), Dota 2 (1570), LoL (1571).
 - **Cache persistant** (collection `esport_cache`) : un redémarrage de l'hébergeur ne re-dépense plus rien.
 - Requêtes envoyées par lots de 2 (évite le 429 « trop de requêtes d'un coup », qui ne bloque qu'1 minute).
 - Direct : cache 10 min, plafonné à 10 appels réels par jour. Listes : cache 3 h (aujourd'hui) / 8 h (demain).
-- Réserve : les tâches de fond s'arrêtent à 15 requêtes restantes ; le rattrapage de l'historique n'utilise que
-  l'excédent (tant qu'il reste 30 requêtes ou plus) et se met en pause 10 min après un échec.
+- Réserve : les tâches de fond s'arrêtent à 15 requêtes restantes. Rattrapage de l'historique en deux régimes :
+  AMORÇAGE (5 derniers jours × 3 jeux ≈ 15 requêtes, une seule fois) à 4 jours par actualisation tant qu'il reste plus de
+  15 requêtes ; puis ENTRETIEN (jusqu'à 45 jours) avec l'excédent seulement (≥ 30 restantes). Pause de 10 min après un échec.
 
 **Pronostics sans appel API.** Chaque liste du jour contient aussi les matchs terminés : on les mémorise
 (`esport_resultats`), on rattrape peu à peu 45 jours d'historique avec le quota excédentaire, et un classement Elo
-(avec ajustement à la force des adversaires) en tire le pronostic de CHAQUE match, affiché directement dans la liste.
+(avec ajustement à la force des adversaires) en tire le pronostic de CHAQUE match, affiché directement dans la liste
+(dès 2 matchs connus par équipe, avec la mention « confiance faible » tant que l'échantillon est petit).
 Le pronostic est figé avant le coup d'envoi ; `GET /esport/bilan` le confronte au résultat, sans aucun appel API.
 
 - `GET /esport/jeux`, `GET /esport/matchs?jeu=csgo` (matchs + `pronostic` + `diagnostic` + `historique`)
